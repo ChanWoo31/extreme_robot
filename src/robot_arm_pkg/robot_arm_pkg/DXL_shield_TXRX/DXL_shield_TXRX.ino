@@ -105,6 +105,7 @@ void setup() {
 
   // delay(200);
   // test_once_arm4down();
+  
 }
 
 // 현재 위치가 목표 위치 근처에 올 때까지 대기
@@ -141,12 +142,25 @@ void loop() {
       dynamixel_motor_4_plus(); 
     } else if (cmd == "ARM4DOWN") {
       dynamixel_motor_4_minus(); 
-    }else {
+    } else if (cmd == "A") {
+      dynamixel_oneshot_1();
+      delay(5000);
+      dynamixel_oneshot_2();
+      delay(5000);
+      dynamixel_oneshot_3();
+      delay(10000);
+      dynamixel_zeropoint();
+      delay(1000);
+    } else if (cmd == "B") {
+      dynamixel_zeropoint();
+      delay(1000);
+    } else {
       Serial.print("Unknown command: ");
       Serial.println(cmd);
     }
   }
 }
+
 // 리프트 올리기
 void lift_up() {
   use_proto_ax();
@@ -208,4 +222,57 @@ void dynamixel_motor_4_minus() {
   int32_t goal_raw = base_raw_4 + motor_goal_spin_4;
   dxl_XL.setGoalPosition(DXL_ID_robot_arm_4, goal_raw, UNIT_RAW);
 }
+
+// 이 아래부턴 영상을 위한 한 방에 가기 위한 코드.
+void move_rel_ticks(int32_t r2, int32_t r3, int32_t r4) {
+  use_proto_xl();
+  r2 = clamp_i32(r2, LIM2_MIN_TICK, LIM2_MAX_TICK);
+  r3 = clamp_i32(r3, LIM3_MIN_TICK, LIM3_MAX_TICK);
+  r4 = clamp_i32(r4, LIM4_MIN_TICK, LIM4_MAX_TICK);
+
+  dxl_XL.setGoalPosition(DXL_ID_robot_arm_2, base_raw_2 + r2, UNIT_RAW);
+  delay(1000);
+  dxl_XL.setGoalPosition(DXL_ID_robot_arm_3, base_raw_3 + r3, UNIT_RAW);
+  dxl_XL.setGoalPosition(DXL_ID_robot_arm_4, base_raw_4 + r4, UNIT_RAW);
+}
+
+void dynamixel_oneshot_1() {
+  move_rel_ticks(4914, 2282, 1107);
+}
+
+void dynamixel_oneshot_2() {
+  move_rel_ticks(6914, 2282, 2407);
+}
+
+void dynamixel_oneshot_3() {
+  move_rel_ticks(6914, 1782, 2707);
+}
+
+void dynamixel_oneshot_4() {
+  move_rel_ticks(6914, 1782, 2007);
+}
+
+void move_rel_ticks_for_zeropoint(int32_t r2, int32_t r3, int32_t r4) {
+  use_proto_xl();
+  r2 = clamp_i32(r2, LIM2_MIN_TICK, LIM2_MAX_TICK);
+  r3 = clamp_i32(r3, LIM3_MIN_TICK, LIM3_MAX_TICK);
+  r4 = clamp_i32(r4, LIM4_MIN_TICK, LIM4_MAX_TICK);
+  dxl_XL.setGoalPosition(DXL_ID_robot_arm_3, base_raw_3 + r3, UNIT_RAW);
+  dxl_XL.setGoalPosition(DXL_ID_robot_arm_4, base_raw_4 + r4, UNIT_RAW);
+  delay(1500);
+  dxl_XL.setGoalPosition(DXL_ID_robot_arm_2, base_raw_2 + r2, UNIT_RAW);
+  delay(1000);
+  
+}
+
+void dynamixel_zeropoint() {
+  move_rel_ticks_for_zeropoint(0, 0, 0);
+}
+
+// void dynamixel_oneshot_4() {
+//   use_proto_xl();
+//   dxl_XL.setGoalPosition(DXL_ID_robot_arm_2, float value, UNIT_RAW);
+//   dxl_XL.setGoalPosition(DXL_ID_robot_arm_3, float value, UNIT_RAW);
+//   dxl_XL.setGoalPosition(DXL_ID_robot_arm_4, float value, UNIT_RAW);
+// }
 

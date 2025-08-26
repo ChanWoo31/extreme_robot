@@ -20,3 +20,8 @@ __pycache__/
 # OS-specific
 .DS_Store
 Thumbs.db
+sensor_pkg_backup.tgz
+*.tgz
+*.zip
+*.bag
+*.log

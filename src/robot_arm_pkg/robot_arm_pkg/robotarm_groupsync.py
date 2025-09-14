@@ -120,12 +120,13 @@ class ArmController(Node):
                      (-np.deg2rad(100), np.deg2rad(10))]
         
         #잘 되는지 테스트 필요
-        self.last_q = np.zeros(len(self.chain.links))
+        # self.last_q = np.zeros(len(self.chain.links))
         self.violation_latched = False
         self.block_until = 0.0
         self.block_sec = 1.0
         
-        self.go_home()
+        self.init_last_q_from_present()
+        # self.go_home()
 
     def int32_to_le(self, v:int):
         v &= 0xFFFFFFFF
@@ -163,6 +164,26 @@ class ArmController(Node):
         self.send_ax_base_deg(np.rad2deg(q[0]) * self.dir[0])
         self.send_x_positions(q[1], q[2] ,q[3])
         tmp = np.zeros(len(self.chain.links)); tmp[1:5] = q; self.last_q = tmp
+
+    def ticks_to_joint_rad(self, joint_idx, ticks):
+        if joint_idx == 0:  # AX-12A J1
+            deg = (ticks - 512) * (300.0/1023.0)
+            return np.deg2rad(deg) * self.dir[0]
+        zero = self.zero[joint_idx]                  # zero[1]→ID2, zero[2]→ID3, zero[3]→ID4
+        motor = (ticks - zero) / RAD2TICKS
+        return (motor / self.gear[joint_idx]) * self.dir[joint_idx]
+
+    def init_last_q_from_present(self):
+        q = [0.0]*4
+        ax_pos,_,_ = self.packet_ax.read2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_PRESENT_POS)
+        q[0] = self.ticks_to_joint_rad(0, ax_pos)
+        for j, dxl_id in enumerate(self.ids_x, start=1):  # j=1..3 → J2..J4
+            pos, res, err = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
+            if res==0 and err==0:
+                q[j] = self.ticks_to_joint_rad(j, int(pos))
+        self.last_q = np.zeros(len(self.chain.links))
+        self.last_q[1:5] = q
+        self.get_logger().info(f"Init last_q(deg)={np.rad2deg(self.last_q[1:5])}")
 
     def move_ik(self, x, y, z):
         ik = self.chain.inverse_kinematics(

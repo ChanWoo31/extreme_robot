@@ -23,7 +23,7 @@ class ArmController(Node):
             Point, 'target_point', self.on_point, 10
         )
         
-        self.DEVICENAME = '/dev/ttyUSB0'
+        self.DEVICENAME = '/dev/ttyUSB1'
         self.BAUDRATE = 1000000
         self.id_ax = 1
         self.ids_x = [2, 3, 4]
@@ -101,10 +101,10 @@ class ArmController(Node):
 
         self.chain = Chain(name='arm4', links=[
             OriginLink(),
-            DHLink(d=d1, a=0, alpha=np.deg2rad(-90), theta=0),
+            DHLink(d=d1, a=0, alpha=np.deg2rad(90), theta=0),
             DHLink(d=0, a=a2, alpha=0, theta=np.deg2rad(0)),
-            DHLink(d=0, a=a3, alpha=0, theta=np.deg2rad(-90)),
-            DHLink(d=0, a=a4, alpha=0, theta=np.deg2rad(-90)),
+            DHLink(d=0, a=a3, alpha=0, theta=np.deg2rad(90)),
+            DHLink(d=0, a=a4, alpha=0, theta=np.deg2rad(90)),
         ],
         active_links_mask=[False, True, True, True, True],
         )
@@ -115,9 +115,9 @@ class ArmController(Node):
         self.z_offset = 0.0
         # 리미트!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         self.limits=[(-np.deg2rad(150), np.deg2rad(150)),
-                     (-np.deg2rad(180), np.deg2rad(0)),
-                     (-np.deg2rad(10), np.deg2rad(100)),
-                     (-np.deg2rad(10), np.deg2rad(100))]
+                     (-np.deg2rad(10), np.deg2rad(180)),
+                     (-np.deg2rad(100), np.deg2rad(10)),
+                     (-np.deg2rad(100), np.deg2rad(10))]
         
         
         self.violation_latched = False

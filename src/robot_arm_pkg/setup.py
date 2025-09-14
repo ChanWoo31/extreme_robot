@@ -40,6 +40,7 @@ setup(
             'dynamixel_bus_node = robot_arm_pkg.dynamixel_bus_node:main',
             'imu_node = robot_arm_pkg.imu_node:main',
             'robotarm_groupsync = robot_arm_pkg.robotarm_groupsync:main',
+            'arm_server = robot_arm_pkg.arm_server:main',
         ],
     },
 )

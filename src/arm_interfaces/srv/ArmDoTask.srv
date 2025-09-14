@@ -1,6 +1,7 @@
 float64 x
 float64 y
 float64 z
+string task # 버튼 누르기, 손잡이, 픽, 플레이스
 ---
 bool success
 string message

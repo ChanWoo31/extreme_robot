@@ -1,4 +1,4 @@
-#groupsync version
+# arm server
 import numpy as np
 import time
 from ikpy.link import OriginLink, DHLink
@@ -6,10 +6,10 @@ from ikpy.chain import Chain
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Point
+
 from dynamixel_sdk import PortHandler, PacketHandler, GroupSyncWrite
 
-from arm_interfaces.srv import MoveArm
+from arm_interfaces.srv import ArmDoTask
 
 d1 = 0
 a2, a3, a4 = 0.18525, 0.18525, 0.256
@@ -20,7 +20,7 @@ AX_TICKS_PER_DEG = 1023.0 / 300.0
 class ArmController(Node):
     def __init__(self):
         super().__init__('arm_controller')
-        self.srv = self.create_service(MoveArm, 'move_arm', self.handle_move_arm)
+        self.srv = self.create_service(ArmDoTask, 'arm_do_task', self.handle_arm_do_task)
         
         self.DEVICENAME = '/dev/ttyUSB0'
         self.BAUDRATE = 1000000
@@ -126,7 +126,10 @@ class ArmController(Node):
         self.block_sec = 1.0
         
         self.init_last_q_from_present()
+        self.dt = 0.02 # 50Hz
         # self.go_home()
+
+    # 유틸
 
     def int32_to_le(self, v:int):
         v &= 0xFFFFFFFF
@@ -151,7 +154,7 @@ class ArmController(Node):
 
     def gripper(self, close: bool):
         if self.ax_grip_id is None: return
-        tgt = 820 if close else 520 # 예시값 조정해야함.
+        tgt = 250 if close else 350 # 예시값 조정해야함. 왼쪽 숫자가 닫힘, 오른쪽이 열렸을 때.
         self.packet_ax.write2ByteTxRx(self.port, self.ax_grip_id, self.AX_ADDR_GOAL_POSITION, tgt)
 
     def stop_hold(self):
@@ -185,79 +188,136 @@ class ArmController(Node):
         self.last_q[1:5] = q
         self.get_logger().info(f"Init last_q(deg)={np.rad2deg(self.last_q[1:5])}")
 
-    def handle_move_arm(self, req, res):
-        # 요청 좌표
-        x, y, z = req.x, req.y, req.z
-        self.get_logger().info(f"[srv] target: x={x:.4f}, y={y:.4f}, z={z:.4f}")
+    # IK / motion
 
-        # IK 계산
+    # def move_ik(self, x, y, z):
+    #     ik = self.chain.inverse_kinematics(
+    #         target_position=[-x, y, z],
+    #         orientation_mode=None,
+    #         initial_position=self.last_q,
+    #     )
+    #     q = list(ik[1:5])
+
+    #     for i in range(4):
+    #         lo, hi = self.limits[i]
+    #         if q[i] < lo: q[i] = lo
+    #         if q[i] > hi: q[i] = hi
+
+    #     self.send_ax_base_deg(np.rad2deg(q[0]) * self.dir[0])
+    #     self.send_x_positions(q[1], q[2] ,q[3])
+    #     tmp = self.last_q.copy(); tmp[1:5] = q; self.last_q = tmp
+
+    #     fk = self.chain.forward_kinematics(np.r_[0.0, q])  # 0+J1..J4
+    #     reach = fk[:3, 3]
+    #     err = np.linalg.norm(reach - np.array([x, y, z]))
+    #     self.get_logger().info(f"FK reach=({reach[0]:.5f},{reach[1]:.5f},{reach[2]:.5f}), err={err*1000:.3f} mm")
+
+    # def on_point(self, msg: Point):
+    #     now = time.time()
+    #     if now < self.block_until:
+    #         self.get_logger().warn('throttle'); return
+        
+    #     x,y,z = msg.x, msg.y, msg.z
+    #     # if max(abs(x), abs(y), abs(z)) > 5.0:
+    #     #     x,y,z = x*0.001, y*0.001, z*0.001
+    #     self.get_logger().info(f"Target (m): {x:.5f}, {y:.5f}, {z:.5f}")
+
+    #     try:
+    #         self.move_ik(x, y, z + self.z_offset)
+    #     except Exception as e:
+    #         self.get_logger().error(f"IK error: {e}")
+    #         self.stop_hold()
+    #     finally:
+    #         self.block_until = time.time() + self.block_sec
+    def solve_ik_q(self, x, y, z):
         ik = self.chain.inverse_kinematics(
             target_position=[-x, y, z],
             orientation_mode=None,
             initial_position=self.last_q,
         )
         q = list(ik[1:5])
-
-        # 리미트 검사: 위반 시 동작하지 않음
         for i, (lo, hi) in enumerate(self.limits):
-            if q[i] < lo or q[i] > hi:
-                res.success = False
-                res.message = f"limit hit at J{i+1}"
-                return res
-
-        # 모터 명령
-        self.send_ax_base_deg(np.rad2deg(q[0]) * self.dir[0])
-        self.send_x_positions(q[1], q[2], q[3])
-
-        # 상태 갱신
-        tmp = self.last_q.copy(); tmp[1:5] = q; self.last_q = tmp
-
-        res.success = True
-        res.message = "ok"
-        return res
-
-    def move_ik(self, x, y, z):
-        ik = self.chain.inverse_kinematics(
-            target_position=[-x, y, z],
-            orientation_mode=None,
-            initial_position=self.last_q,
-        )
-        q = list(ik[1:5])
-
-        for i in range(4):
-            lo, hi = self.limits[i]
-            if q[i] < lo: q[i] = lo
-            if q[i] > hi: q[i] = hi
-
+            if q[i] < lo or q[i] > hi: return None
+        return q
+    
+    def send_q(self, q):
         self.send_ax_base_deg(np.rad2deg(q[0]) * self.dir[0])
         self.send_x_positions(q[1], q[2] ,q[3])
         tmp = self.last_q.copy(); tmp[1:5] = q; self.last_q = tmp
 
-        fk = self.chain.forward_kinematics(np.r_[0.0, q])  # 0+J1..J4
-        reach = fk[:3, 3]
-        err = np.linalg.norm(reach - np.array([x, y, z]))
-        self.get_logger().info(f"FK reach=({reach[0]:.5f},{reach[1]:.5f},{reach[2]:.5f}), err={err*1000:.3f} mm")
+    def move_ik(self, x, y, z):
+        q = self.solve_ik_q(x, y, z)
+        if q is None: return False
+        self.send_q(q)
+        time.sleep(self.dt)
+        return True
+    
+    def move_lin(self, p_from, p_to, T=1.5, steps=20):
+        for s in np.linspace(0, 1, steps):
+            p = (1-s)*p_from + s*p_to
+            if not self.move_ik(*p): return False
+            time.sleep(T/steps)
+        return True
+    
+    def fk_tip(self):
+        T = self.chain.forward_kinematics(self.last_q)
+        return T[:3, 3]
+    
+    # 프리미티브(접근/이탈)
 
-    def on_point(self, msg: Point):
-        now = time.time()
-        if now < self.block_until:
-            self.get_logger().warn('throttle'); return
-        
-        x,y,z = msg.x, msg.y, msg.z
-        # if max(abs(x), abs(y), abs(z)) > 5.0:
-        #     x,y,z = x*0.001, y*0.001, z*0.001
-        self.get_logger().info(f"Target (m): {x:.5f}, {y:.5f}, {z:.5f}")
+    def approach(self, p, dz=0.06):
+        now = self.fk_tip()
+        above = p + np.array([0,0,dz])
+        return self.move_lin(now, above, T=1.0) and self.move_lin(above, p, T=0.8)
+    
+    def retreat(self, p, dz=0.06):
+        up = p + np.array([0,0,dz])
+        return self.move_lin(p, up, T=0.8)
+    
+    # 동작 시퀀스
+    
+    def press_button_seq(self, p):
+        if not self.approach(p, dz=0.05): return False
+        push = p + np.array([0.0, -0.018])
+        if not self.move_lin(p, push, T=0.4): return False
+        if not self.move_lin(push, p, T=0.4): return False
+        return self.retreat(p, dz=0.05)
+    
+    # def open_handle_seq(self, p):
 
-        try:
-            self.move_ik(x, y, z + self.z_offset)
-        except Exception as e:
-            self.get_logger().error(f"IK error: {e}")
-            self.stop_hold()
-        finally:
-            self.block_until = time.time() + self.block_sec
+    def pick_seq(self, p):
+        self.gripper(False)
+        if not self.approach(p, dz=0.08): return False
+        down = p + np.array([0,0,-0.025])
+        if not self.move_lin(p, down, T=0.5): return False
+        self.gripper(True)
+        lift = down + np.array([0,0,0.1])
+        return self.move_lin(down, lift, T=0.7)
 
+    def place_seq(self, p):
+        if not self.approach(p, dz=0.08): return False
+        down = p + np.array([0,0,-0.025])
+        if not self.move_lin(p, down, T=0.5): return False
+        self.gripper(False)
+        up = down + np.array([0,0,0.10])
+        return self.move_lin(down, up, T=0.7)
+    
+    # 서비스 핸들러
+    def handle_arm_do_task(self, request, response):
+        x, y, z, task = request.x, request.y, request.z, request.task
+        p = np.array([x, y, z], dtype=float)
 
-        
+        ok = False
+        if task == 'press_button': ok = self.press_button_seq(p)
+        elif task == 'open_handle': ok = self. turn_handle_seq(p)
+        elif task == 'pick': ok = self.pick_seq(p)
+        elif task == 'place': ok = self.place_seq(p)
+        else:
+            response.success = False; response.message = f'Unknown task {task}'; return response
+        response.success = bool(ok)
+        response.message = 'done' if ok else 'failed'
+        return response
+
 
 def main():
     rclpy.init()

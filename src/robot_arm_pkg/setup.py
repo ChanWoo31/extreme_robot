@@ -34,12 +34,12 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'robot_arm_control_test = robot_arm_pkg.robot_arm_control_test:main',
+            'robot_arm_control_test2 = robot_arm_pkg.robot_arm_control_test2:main',
             'motor_test = robot_arm_pkg.motor_test:main',
             'serial_test = robot_arm_pkg.serial_test:main',
             'dynamixel_bus_node = robot_arm_pkg.dynamixel_bus_node:main',
             'imu_node = robot_arm_pkg.imu_node:main',
-            'robot_arm_control_test2 = robot_arm_pkg.robot_arm_control_test2:main',
+            'robotarm_groupsync = robot_arm_pkg.robotarm_groupsync:main',
         ],
     },
 )

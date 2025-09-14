@@ -10,7 +10,7 @@ from geometry_msgs.msg import Point
 from dynamixel_sdk import PortHandler, PacketHandler
 
 d1 = 0
-a2, a3, a4 = 0.28525, 0.19025, 0.256
+a2, a3, a4 = 0.18525, 0.18525, 0.256
 
 TICKS_PER_REV = 4096
 RAD2TICKS = TICKS_PER_REV / (2*np.pi)
@@ -86,7 +86,7 @@ class ArmController(Node):
 
         self.get_logger().info('ArmController initialized')
 
-        self.gear = [1.0, 7.0, 4.0, 4.0]
+        self.gear = [1.0, 5.0, 5.0, 5.0]
         self.dir = [1, -1, 1, 1]
         self.joint_to_id = {1:2, 2:3, 3:4}
         self.zero_ticks = {}
@@ -283,5 +283,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 

@@ -38,7 +38,7 @@ setup(
             'motor_test = robot_arm_pkg.motor_test:main',
             'serial_test = robot_arm_pkg.serial_test:main',
             'dynamixel_bus_node = robot_arm_pkg.dynamixel_bus_node:main',
-            'imu_node = robot_arm_pkg.imu_node:main',
+            'dynamixel_manual_mode = robot_arm_pkg.dynamixel_manual_mode:main',
             'robotarm_groupsync = robot_arm_pkg.robotarm_groupsync:main',
             'arm_server = robot_arm_pkg.arm_server:main',
         ],

@@ -1,152 +1,334 @@
+#groupsync version -> 매뉴얼
 import numpy as np
-from dynamixel_sdk import PortHandler, PacketHandler, COMM_SUCCESS, GroupSyncWrite
 import time
+from ikpy.link import OriginLink, DHLink
+from ikpy.chain import Chain
+
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import Point
+from std_msgs.msg import String
+from dynamixel_sdk import PortHandler, PacketHandler, GroupSyncWrite
+
+d1 = 0
+a2, a3, a4 = 0.18525, 0.18525, 0.256
+
+RAD2TICKS = 4096 / (2*np.pi)
+AX_TICKS_PER_DEG = 1023.0 / 300.0
+ 
+class ArmController(Node):
+    def __init__(self):
+        super().__init__('arm_controller')
+        # self.sub = self.create_subscription(
+        #     Point, 'target_point', self.on_point, 10
+        # )
+        
+        self.DEVICENAME = '/dev/ttyUSB0'
+        self.BAUDRATE = 1000000
+        self.ax_base_id = 1   # 베이스 J1
+        self.ax_grip_id = 5   # 그리퍼
+        self.ids_x = [2, 3, 4]  # J2, J3, J4
+
+        # Control table(protocol 1.0)
+        self.AX_ADDR_TORQUE_ENABLE = 24
+        self.AX_ADDR_GOAL_POSITION = 30
+        self.AX_ADDR_MOVING_SPEED = 32
+        self.AX_ADDR_PRESENT_POS = 36
+
+        # Control table(protocol 2.0)
+        self.ADDR_OPERATING_MODE = 11
+        self.ADDR_CURRENT_LIMIT = 38
+        self.ADDR_TORQUE_ENABLE = 64
+        self.ADDR_PROFILE_ACCEL = 108
+        self.ADDR_PROFILE_VELOCITY = 112
+        self.ADDR_GOAL_POSITION = 116
+        self.ADDR_PRESENT_POSITION = 132
+        
+        self.TORQUE_ENABLE = 1
+        self.TORQUE_DISABLE = 0
+
+        # ---- 추가 파라미터 ----
+        self.ax_lift_id  = self.declare_parameter('ax_lift_id', 6).get_parameter_value().integer_value
+        self.xl_back_id  = self.declare_parameter('xl_back_id', 7).get_parameter_value().integer_value
+        self.back_up_tick    = self.declare_parameter('back_up_tick',    4095).get_parameter_value().integer_value
+        self.back_center_tick= self.declare_parameter('back_center_tick',2048).get_parameter_value().integer_value
+        self.back_down_tick  = self.declare_parameter('back_down_tick',  0).get_parameter_value().integer_value
+
+        self.grip_open_tick  = self.declare_parameter('grip_open_tick', 350).get_parameter_value().integer_value
+        self.grip_close_tick = self.declare_parameter('grip_close_tick', 250).get_parameter_value().integer_value
+
+        # --- arm manual ---
+        self.home_x = self.declare_parameter('home_x', 0.07075).get_parameter_value().double_value
+        self.home_y = self.declare_parameter('home_y', 0.0).get_parameter_value().double_value
+        self.home_z = self.declare_parameter('home_z', 0.18525).get_parameter_value().double_value
+        self.cart_step = self.declare_parameter('cart_step_m', 0.05).get_parameter_value().double_value  # 5 cm
+        self.home = np.array([self.home_x, self.home_y, self.home_z], dtype=float)
+        self.manual_offset = np.zeros(3, dtype=float)
 
 
+        # ---- 추가 구독 ----
+        self.sub_arm_manual  = self.create_subscription(String, '/arm/cmd/manual',       self.on_arm_manual, 50)
+        self.sub_lift        = self.create_subscription(String, '/lift/cmd/manual',      self.on_lift, 20)
+        self.sub_back_lift   = self.create_subscription(String, '/back_lift/cmd/manual', self.on_back_lift, 20)
+        self.sub_gripper     = self.create_subscription(String, '/gripper/cmd/manual',   self.on_gripper, 20)
 
-
-DIRECTION = [ 1]
-
-JOINT_IDS = [1]
-JOINT_IDS = np.array(JOINT_IDS).astype(int)
-
-DEVICENAME = '/dev/ttyUSB0'
-BAUDRATE = 1000000
-PROTOCOL_VERSION = 2.0
-ADDR_TORQUE_ENABLE = 64
-ADDR_GOAL_POSITION = 116  # 4 byte
-ADDR_MOVING_SPEED = 112  # 4 byte
-ADDR_PRESENT_POSITION = 132  # 4 byte
-ADDR_MX_TORQUE_LIMIT = 38
-TORQUE_ENABLE = 1
-TORQUE_DISABLE = 0
-
-ADDR_OPERATING_MODE = 11
-MODE_EXT_POSITION = 4
-
-Moving_Speed = 32
-z_offset = 43
-
-def deg2dxl(deg: float) -> int:
-    ang = ((deg + 180) % 360) - 180
-    ratio = (ang + 180) / 360
-    raw = int(ratio * 4096)
-    return max(0, min(4096, raw))
-
-def dxl2deg(raw: int) -> float:
-    return raw / 4096 * 360 - 180
-
-def deg2dxl_ext(deg: float) -> int:
-    """
-    확장 Position 모드용 변환.
-    deg: 회전 각도 (예: 360→1회전, 1080→3회전)
-    """
-    # 1회전 = 4096 count
-    raw = int(deg / 360.0 * 4096)
-    return raw
-
-
-
-class DXLController:
-    def __init__(self, device=DEVICENAME, baud=BAUDRATE):
-        self.port = PortHandler(device)
+        # 포트
+        self.port = PortHandler(self.DEVICENAME)
+        
         if not self.port.openPort():
-            raise IOError(f"Failed to open port {device}")
-        if not self.port.setBaudRate(baud):
-            raise IOError(f"Failed to set baudrate {baud}")
-        self.packet = PacketHandler(PROTOCOL_VERSION)
-        self.sync_write = GroupSyncWrite(self.port, self.packet, ADDR_GOAL_POSITION, 4)
-        self.sync_speed = GroupSyncWrite(self.port, self.packet,
-                                         ADDR_MOVING_SPEED, 4)
+            self.get_logger().error('Failed to open port')
+            return
+        if not self.port.setBaudRate(self.BAUDRATE):
+            self.get_logger().error('Failed to set baudrate')
+            return
+        
+        # 프로토콜 핸들러
+        self.packet_ax = PacketHandler(1.0)
+        self.packet_x = PacketHandler(2.0)
 
-    def enable_torque(self, ids):
-        for j in ids:
-            self.packet.write1ByteTxRx(self.port, j, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
+        # AX-12A 초기 설정
+        for ax_id in [i for i in [self.ax_base_id, self.ax_lift_id, self.ax_grip_id] if i is not None]:
+            self.packet_ax.write1ByteTxRx(self.port, ax_id, self.AX_ADDR_TORQUE_ENABLE, self.TORQUE_DISABLE)
+            self.packet_ax.write2ByteTxRx(self.port, ax_id, self.AX_ADDR_MOVING_SPEED, 100)
+            self.packet_ax.write1ByteTxRx(self.port, ax_id, self.AX_ADDR_TORQUE_ENABLE, self.TORQUE_ENABLE)
+        
+        # XL backlift init: Position mode(3)
+        self.packet_x.write1ByteTxRx(self.port, self.xl_back_id, self.ADDR_TORQUE_ENABLE, self.TORQUE_DISABLE)
+        self.packet_x.write1ByteTxRx(self.port, self.xl_back_id, self.ADDR_OPERATING_MODE, 3)
+        self.packet_x.write4ByteTxRx(self.port, self.xl_back_id, self.ADDR_PROFILE_ACCEL, 20)
+        self.packet_x.write4ByteTxRx(self.port, self.xl_back_id, self.ADDR_PROFILE_VELOCITY, 60)
+        self.packet_x.write1ByteTxRx(self.port, self.xl_back_id, self.ADDR_TORQUE_ENABLE, self.TORQUE_ENABLE)
 
-    def enable_torque_single(self, id):
-        self.packet.write1ByteTxRx(self.port, id, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
+        # 팔 X-series 초기 설정
+        for dxl_id in self.ids_x:
+            # Extended 포지션 모드 4번
+            self.packet_x.write1ByteTxRx(self.port, dxl_id, self.ADDR_OPERATING_MODE, 4)
+            # current limit
+            self.packet_x.write2ByteTxRx(self.port, dxl_id, self.ADDR_CURRENT_LIMIT, 300)
+            # 가속/속도
+            self.packet_x.write4ByteTxRx(self.port, dxl_id, self.ADDR_PROFILE_ACCEL, 10)
+            self.packet_x.write4ByteTxRx(self.port, dxl_id, self.ADDR_PROFILE_VELOCITY, 50)
+            # 필요시 Homing Offset (엔코더 0점을 기구학적 0으로 보전)
+            # self.packet.write4ByteTxRx(self.port, self.ids, self.ADDR_HOMING_OFFSET, offset_ticks)
 
-    def disable_torque(self, ids):
-        for j in ids:
-            self.packet.write1ByteTxRx(self.port, j, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
+            # 토크 온
+            self.packet_x.write1ByteTxRx(self.port, dxl_id, self.ADDR_TORQUE_ENABLE, self.TORQUE_ENABLE)
 
-    def set_positions(self, deg_list):
+        self.sync_write = GroupSyncWrite(
+            self.port, self.packet_x,
+            self.ADDR_GOAL_POSITION, 4
+        )
+        self.sync_speed = GroupSyncWrite(self.port, self.packet_x, self.ADDR_PROFILE_VELOCITY, 4)
+
+
+        self.get_logger().info('ArmController initialized')
+
+        # 기구/맵핑
+        self.gear = [1.0, 5.0, 5.0, 5.0]
+        self.dir = [1, -1, 1, 1]
+        self.zero = [0]
+        for dxl_id in self.ids_x:
+            pos, result, error = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
+            if result == 0 and error == 0:
+                self.zero.append(pos)
+                self.get_logger().info(f"ID {dxl_id} initial pos (zero offset)")
+            else:
+                self.zero.append(0)
+                self.get_logger().error(f"Failed") 
+
+        # 역 ㄷ자 시작
+        self.chain = Chain(name='arm4', links=[
+            OriginLink(),
+            DHLink(d=d1, a=0, alpha=np.deg2rad(90), theta=0),
+            DHLink(d=0, a=a2, alpha=0, theta=np.deg2rad(0)),
+            DHLink(d=0, a=a3, alpha=0, theta=np.deg2rad(90)),
+            DHLink(d=0, a=a4, alpha=0, theta=np.deg2rad(90)),
+        ]
+        )
+        self.z_offset = 0.0
+        # 리미트!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        self.limits=[(-np.deg2rad(150), np.deg2rad(150)),
+                     (-np.deg2rad(0), np.deg2rad(180)),
+                     (-np.deg2rad(100), np.deg2rad(10)),
+                     (-np.deg2rad(100), np.deg2rad(10))]
+        
+        #잘 되는지 테스트 필요
+        # self.last_q = np.zeros(len(self.chain.links))
+        self.violation_latched = False
+        self.block_until = 0.0
+        self.block_sec = 1.0
+        
+        self.init_last_q_from_present()
+        # self.go_home()
+
+        
+
+
+    def int32_to_le(self, v:int):
+        v &= 0xFFFFFFFF
+        return bytes([v & 0xFF, (v>>8)&0xFF, (v>>16)&0xFF, (v>>24)&0xFF])
+
+    def joint_rad_to_motor_ticks(self, i, q_joint):
+        q_motor = (q_joint * self.dir[i]) * self.gear[i]
+        ticks = int(round(q_motor * RAD2TICKS)) + self.zero[i]
+        return max(-2_147_483_648, min(2_147_483_647, ticks))
+
+    def send_x_positions(self, q2, q3, q4):
+        ticks = [self.joint_rad_to_motor_ticks(1, q2), self.joint_rad_to_motor_ticks(2, q3), self.joint_rad_to_motor_ticks(3, q4)]
         self.sync_write.clearParam()
-        for idx, j in enumerate(JOINT_IDS):
-            angle = deg_list[idx] * DIRECTION[idx]
-            raw = deg2dxl(angle)
-            # 4 바이트 little endian
-            param = [
-                raw & 0xFF,
-                (raw >> 8) & 0xFF,
-                (raw >> 16) & 0xFF,
-                (raw >> 24) & 0xFF,
-            ]   
-            self.sync_write.addParam(j, bytes(param))
+        for dxl_id, t in zip(self.ids_x, ticks):
+            self.sync_write.addParam(dxl_id, self.int32_to_le(t))
         self.sync_write.txPacket()
-        if self.sync_write.txPacket() != COMM_SUCCESS:
-            raise RuntimeError("SyncWrite error")
 
-    def get_position(self, j):
-        val, comm, err = self.packet.read2ByteTxRx(self.port, j, ADDR_PRESENT_POSITION)
-        if comm != COMM_SUCCESS or err != 0:
-            raise RuntimeError(f"Dxl error ID{j}")
-        return dxl2deg(val)
+    def send_ax_base_deg(self, deg):
+        ax_ticks = int(round((deg / 300.0) * 1023.0)) + 512
+        ax_ticks = max(0, min(1023, ax_ticks))
+        self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, ax_ticks)
 
-    def close(self):
-        self.port.closePort()
+    def gripper(self, close: bool):
+        if self.ax_grip_id is None: return
+        tgt = 250 if close else 350 # 예시값 조정해야함. 왼쪽 숫자가 닫힘, 오른쪽이 열렸을 때.
+        self.packet_ax.write2ByteTxRx(self.port, self.ax_grip_id, self.AX_ADDR_GOAL_POSITION, tgt)
 
-    def motor_speed(self, dxl_id, speed_val):
-        self.packet.write2ByteTxRx(self.port, dxl_id, Moving_Speed, speed_val)
+    def stop_hold(self):
+        pos_ax,_,_ = self.packet_ax.read2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_PRESENT_POS)
+        self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, pos_ax)
+        self.send_x_positions(*[ (self.last_q[i+1]) for i in range(3)])
 
-    def set_speed(self, speed):
-        self.sync_speed.clearParam()
-        for j in JOINT_IDS:
-            # 4바이트 little endian으로 분할
-            param = [
-                speed        & 0xFF,
-                (speed >> 8) & 0xFF,
-                (speed >> 16)& 0xFF,
-                (speed >> 24)& 0xFF,
-            ]
-            if not self.sync_speed.addParam(j, bytes(param)):
-                raise RuntimeError(f"Speed addParam 실패 ID={j}")
-        if self.sync_speed.txPacket() != COMM_SUCCESS:
-            raise RuntimeError("Speed SyncWrite error")
-        self.sync_speed.clearParam()
+    def go_home(self):
+        q = [0.0, 0.0, 0.0, 0.0]
+        self.send_ax_base_deg(np.rad2deg(q[0]) * self.dir[0])
+        self.send_x_positions(q[1], q[2] ,q[3])
+        tmp = np.zeros(len(self.chain.links)); tmp[1:5] = q; self.last_q = tmp
 
-    def move_joint(self, joint_id: int, position_deg: float, speed: int = None):
-        raw_pos = deg2dxl(position_deg)
-        self.packet.write4ByteTxRx(self.port, joint_id, ADDR_GOAL_POSITION, raw_pos)
+    def ticks_to_joint_rad(self, joint_idx, ticks):
+        if joint_idx == 0:  # AX-12A J1
+            deg = (ticks - 512) * (300.0/1023.0)
+            return np.deg2rad(deg) * self.dir[0]
+        zero = self.zero[joint_idx]                  # zero[1]→ID2, zero[2]→ID3, zero[3]→ID4
+        motor = (ticks - zero) / RAD2TICKS
+        return (motor / self.gear[joint_idx]) * self.dir[joint_idx]
 
-    def set_mode(self, mode: int):
-        """Operating Mode(1byte)를 한 번에 바꿉니다."""
-        for j in JOINT_IDS:
-            self.packet.write1ByteTxRx(self.port, j,
-                                       ADDR_OPERATING_MODE,
-                                       mode)    
-    
-    def move_joint_ext(self, joint_id: int, position_deg: float, speed: int=None):
-        raw_pos = deg2dxl_ext(position_deg)
-        # Goal Position(4바이트)으로 직접 쓰기
-        self.packet.write4ByteTxRx(self.port, joint_id,
-                                   ADDR_GOAL_POSITION,
-                                   raw_pos)
-    
+    def init_last_q_from_present(self):
+        q = [0.0]*4
+        ax_pos,_,_ = self.packet_ax.read2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_PRESENT_POS)
+        q[0] = self.ticks_to_joint_rad(0, ax_pos)
+        for j, dxl_id in enumerate(self.ids_x, start=1):  # j=1..3 → J2..J4
+            pos, res, err = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
+            if res==0 and err==0:
+                q[j] = self.ticks_to_joint_rad(j, int(pos))
+        self.last_q = np.zeros(len(self.chain.links))
+        self.last_q[1:5] = q
+        self.get_logger().info(f"Init last_q(deg)={np.rad2deg(self.last_q[1:5])}")
+
+    def move_ik(self, x, y, z):
+        ik = self.chain.inverse_kinematics(
+            target_position=[-x, y, z],
+            orientation_mode=None,
+            initial_position=self.last_q,
+        )
+        q = list(ik[1:5])
+
+        for i in range(4):
+            lo, hi = self.limits[i]
+            if q[i] < lo: q[i] = lo
+            if q[i] > hi: q[i] = hi
+
+        self.send_ax_base_deg(np.rad2deg(q[0]) * self.dir[0])
+        self.send_x_positions(q[1], q[2] ,q[3])
+        tmp = self.last_q.copy(); tmp[1:5] = q; self.last_q = tmp
+
+        fk = self.chain.forward_kinematics(np.r_[0.0, q])  # 0+J1..J4
+        reach = fk[:3, 3]
+        err = np.linalg.norm(reach - np.array([x, y, z]))
+        self.get_logger().info(f"FK reach=({reach[0]:.5f},{reach[1]:.5f},{reach[2]:.5f}), err={err*1000:.3f} mm")
+
+    # def on_point(self, msg: Point):
+    #     now = time.time()
+    #     if now < self.block_until:
+    #         self.get_logger().warn('throttle'); return
+        
+    #     x,y,z = msg.x, msg.y, msg.z
+    #     # if max(abs(x), abs(y), abs(z)) > 5.0:
+    #     #     x,y,z = x*0.001, y*0.001, z*0.001
+    #     self.get_logger().info(f"Target (m): {x:.5f}, {y:.5f}, {z:.5f}")
+
+    #     try:
+    #         self.move_ik(x, y, z + self.z_offset)
+    #     except Exception as e:
+    #         self.get_logger().error(f"IK error: {e}")
+    #         self.stop_hold()
+    #     finally:
+    #         self.block_until = time.time() + self.block_sec
+
+    def on_arm_manual(self, msg: String):
+        c = msg.data.strip().lower()
+        s = self.cart_step
+
+        if   c == 'home':
+            self.manual_offset[:] = 0.0
+        elif c in ('front','f'):
+            self.manual_offset[0] += s
+        elif c in ('back','b'):
+            self.manual_offset[0] -= s
+        elif c in ('left','l'):
+            self.manual_offset[1] += s
+        elif c in ('right','r'):
+            self.manual_offset[1] -= s
+        elif c in ('up','u'):
+            self.manual_offset[2] += s
+        elif c in ('down','d'):
+            self.manual_offset[2] -= s
+        elif c.startswith('step '):
+            try:
+                self.cart_step = float(c.split()[1])
+                self.get_logger().info(f'step={self.cart_step} m')
+            except Exception:
+                self.get_logger().warn('usage: step <meters>')
+            return
+        else:
+            self.get_logger().warn(f'unknown cmd: {c}')
+            return
+
+        tgt = self.home + self.manual_offset
+        self.move_ik(tgt[0], tgt[1], tgt[2])  # J1~J4 모두 IK로 구동
+
+    def on_back_lift(self, msg: String):
+        c = msg.data.strip().lower()
+        if   c == 'up':       tick = self.back_up_tick
+        elif c == 'down':     tick = self.back_down_tick
+        elif c in ('center','home'):
+            tick = self.back_center_tick
+        else:
+            self.get_logger().warn('use: up|down|center'); return
+        self.packet_x.write4ByteTxRx(self.port, self.xl_back_id, self.ADDR_GOAL_POSITION, int(tick))
+
+    def on_gripper(self, msg: String):
+        c = msg.data.strip().lower()
+        if   c == 'open':  tgt = self.grip_open_tick
+        elif c == 'close': tgt = self.grip_close_tick
+        else:
+            self.get_logger().warn('use: open|close'); return
+        self.packet_ax.write2ByteTxRx(self.port, self.ax_grip_id, self.AX_ADDR_GOAL_POSITION, int(tgt))
+
+    def on_lift(self, msg: String):
+        c = msg.data.strip().lower()
+        if   c == 'down':   tgt = 0
+        elif c == 'center': tgt = 512
+        elif c == 'up':     tgt = 1023
+        else: return
+        self.packet_ax.write2ByteTxRx(self.port, self.ax_lift_id, self.AX_ADDR_GOAL_POSITION, int(tgt))
+
+        
+
+def main():
+    rclpy.init()
+    node = ArmController()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
 
 
-
-
-if __name__ == "__main__":
-
-    dxl = DXLController()
-    dxl.set_mode(MODE_EXT_POSITION)        # Extended 모드
-    dxl.enable_torque(JOINT_IDS)           # 토크 켜기
-
-    # 1회전(360°), 2회전, 3회전 각각 테스트
-    for rev in [1, 2, 3]:
-        dxl.move_joint_ext(JOINT_IDS[0], 360 * rev)
-        time.sleep(3)
-
-    dxl.disable_torque(JOINT_IDS)
-    dxl.close()

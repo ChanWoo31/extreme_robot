@@ -22,7 +22,7 @@ class ArmController(Node):
             Point, 'target_point', self.on_point, 10
         )
         
-        self.DEVICENAME = '/dev/ttyUSB1'
+        self.DEVICENAME = '/dev/ttyUSB0'
         self.BAUDRATE = 1000000
         self.ax_base_id = 1   # 베이스 J1
         self.ax_grip_id = 5   # 그리퍼
@@ -151,7 +151,7 @@ class ArmController(Node):
 
     def gripper(self, close: bool):
         if self.ax_grip_id is None: return
-        tgt = 820 if close else 520 # 예시값 조정해야함.
+        tgt = 250 if close else 350 # 예시값 조정해야함. 왼쪽 숫자가 닫힘, 오른쪽이 열렸을 때.
         self.packet_ax.write2ByteTxRx(self.port, self.ax_grip_id, self.AX_ADDR_GOAL_POSITION, tgt)
 
     def stop_hold(self):

@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'imu_node = sensor_pkg.imu_node:main',
+            'imu_e2box_publisher = sensor_pkg.imu_e2box_publisher:main',
         ],
     },
 )

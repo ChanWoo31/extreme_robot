@@ -27,8 +27,12 @@ XL_ADDR_GOAL_POSITION = 116
 XL_OP_POSITION        = 3
 XL_TICKS_PER_REV      = 4096
 
-# RAD2TICKS = 4096 / (2*np.pi)
+RAD2TICKS = 4096 / (2*np.pi)
 
+def xl_tick2rad(t): return (t / 4096.0) * 2 * np.pi
+def xl_rad2tick(r):
+    t = int(round((r / (2*np.pi)) * 4096.0))
+    return max(0, min(4095, t))
 
 def ax_deg2tick(deg: float)->int:
     return max(0, min(1023, int(round(deg * 1023.0 / 300.0))))
@@ -44,14 +48,17 @@ class DynamixelManualMode(Node):
         self.port_name   = self.declare_parameter('port', '/dev/ttyUSB0').get_parameter_value().string_value
         self.baud        = self.declare_parameter('baud', 1000000).get_parameter_value().integer_value
         # IDs
+        self.ax_base_id  = self.declare_parameter('ax_base_id', 1).get_parameter_value().integer_value
         self.ax_lift_id  = self.declare_parameter('ax_lift_id', 6).get_parameter_value().integer_value
         self.ax_grip_id  = self.declare_parameter('ax_grip_id', 5).get_parameter_value().integer_value
-        self.xl_ids      = list(self.declare_parameter('xl_ids', [1,2,3,4]).get_parameter_value().integer_array_value)
+        self.xl_back_lift_id = self.declare_parameter('xl_back_lift_id', 7).get_parameter_value().integer_value
+        self.xl_ids      = list(self.declare_parameter('xl_ids', [2,3,4]).get_parameter_value().integer_array_value)
         # 동작 파라미터
         self.lift_step_deg   = self.declare_parameter('lift_step_deg', 90.0).get_parameter_value().double_value
         self.arm_step_deg    = self.declare_parameter('arm_step_deg', 3.0).get_parameter_value().double_value
-        self.grip_open_tick  = max(0, min(1023, self.declare_parameter('grip_open_tick', 850).get_parameter_value().integer_value))
-        self.grip_close_tick = max(0, min(1023, self.declare_parameter('grip_close_tick', 200).get_parameter_value().integer_value))
+        self.grip_open_tick  = max(0, min(1023, self.declare_parameter('grip_open_tick', 350).get_parameter_value().integer_value))
+        self.grip_close_tick = max(0, min(1023, self.declare_parameter('grip_close_tick', 250).get_parameter_value().integer_value))
+        # self.back_lift_deg = self.declare_parameter()
         self.xl_profile_vel  = self.declare_parameter('xl_profile_vel', 80).get_parameter_value().integer_value
         self.xl_profile_acc  = self.declare_parameter('xl_profile_acc', 30).get_parameter_value().integer_value
         self.xl_neutral      = list(self.declare_parameter('xl_neutral_ticks', [2048,2048,2048,2048]).get_parameter_value().integer_array_value)
@@ -64,11 +71,14 @@ class DynamixelManualMode(Node):
         if not self.port.openPort() or not self.port.setBaudRate(self.baud):
             raise RuntimeError('Failed to open/set baud on port')
 
-        # ---- AX(리프트/그리퍼) 초기화 ----
+        # ---- AX(로봇팔베이스/리프트/그리퍼) 초기화 ----
+        self._ax_write1(self.ax_base_id, AX_ADDR_TORQUE_ENABLE, 0)
         self._ax_write1(self.ax_lift_id, AX_ADDR_TORQUE_ENABLE, 0)
         self._ax_write1(self.ax_grip_id, AX_ADDR_TORQUE_ENABLE, 0)
-        self._ax_write2(self.ax_lift_id, AX_ADDR_MOVING_SPEED, 200)  # 보수적 속도
+        self._ax_write2(self.ax_base_id, AX_ADDR_MOVING_SPEED, 100)  # 보수적 속도
+        self._ax_write2(self.ax_lift_id, AX_ADDR_MOVING_SPEED, 200)
         self._ax_write2(self.ax_grip_id, AX_ADDR_MOVING_SPEED, 150)
+        self._ax_write1(self.ax_base_id, AX_ADDR_TORQUE_ENABLE, 1)
         self._ax_write1(self.ax_lift_id, AX_ADDR_TORQUE_ENABLE, 1)
         self._ax_write1(self.ax_grip_id, AX_ADDR_TORQUE_ENABLE, 1)
 
@@ -89,6 +99,7 @@ class DynamixelManualMode(Node):
 
         # ---- 구독(매뉴얼 토픽) ----
         self.create_subscription(String, '/lift/cmd/manual',    self._on_lift,    20)
+        self.create_subscription(String, '/back_lift/cmd/manual',    self._on_back_lift,    20)
         self.create_subscription(String, '/arm/cmd/manual',     self._on_arm,     50)
         self.create_subscription(String, '/gripper/cmd/manual', self._on_gripper, 20)
 
@@ -98,11 +109,24 @@ class DynamixelManualMode(Node):
         # 변경 플래그
         self._dirty_ax_lift   = True
         self._dirty_ax_grip   = False
+        self._dirty_xl_back_lift = True
         self._dirty_xl_arm    = True
 
     # ---------- 콜백 ----------
     def _on_lift(self, msg: String):
-        step = ax_deg2tick(self.lift_step_deg)
+        # step = ax_deg2tick(self.lift_step_deg)
+        c = msg.data.strip().lower()
+        if c == 'down':
+            self.ax_lift_goal = 0
+            self._dirty_ax_lift = True
+        elif c == 'up':
+            self.ax_lift_goal = 1023
+            self._dirty_ax_lift = True
+        elif c == 'center':
+            self.ax_lift_goal = 512
+            self._dirty_ax_lift = True
+
+    def _on_back_lift(self, msg: String):
         c = msg.data.strip().lower()
         if c == 'down':
             self.ax_lift_goal = 0

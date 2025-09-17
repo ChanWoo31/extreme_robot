@@ -61,7 +61,7 @@ class ArmController(Node):
         self.home_x = self.declare_parameter('home_x', 0.07075).get_parameter_value().double_value
         self.home_y = self.declare_parameter('home_y', 0.0).get_parameter_value().double_value
         self.home_z = self.declare_parameter('home_z', 0.18525).get_parameter_value().double_value
-        self.cart_step = self.declare_parameter('cart_step_m', 0.05).get_parameter_value().double_value  # 5 cm
+        self.cart_step = self.declare_parameter('cart_step_m', 0.1).get_parameter_value().double_value  # 5 cm
         self.home = np.array([self.home_x, self.home_y, self.home_z], dtype=float)
         self.manual_offset = np.zeros(3, dtype=float)
 

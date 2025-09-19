@@ -41,6 +41,7 @@ setup(
             'dynamixel_manual_mode = robot_arm_pkg.dynamixel_manual_mode:main',
             'robotarm_groupsync = robot_arm_pkg.robotarm_groupsync:main',
             'arm_server = robot_arm_pkg.arm_server:main',
+            'realsense = robot_arm_pkg.realsense:main',
         ],
     },
 )

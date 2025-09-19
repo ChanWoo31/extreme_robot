@@ -48,11 +48,17 @@ class ArmController(Node):
         self.TORQUE_DISABLE = 0
 
         # ---- 추가 파라미터 ----
-        self.ax_lift_id  = self.declare_parameter('ax_lift_id', 6).get_parameter_value().integer_value
+        # self.ax_lift_id  = self.declare_parameter('ax_lift_id', 6).get_parameter_value().integer_value
+        self.x_lift_id = self.declare_parameter('x_lift_id', 6).get_parameter_value().integer_value
+        self.x_lift_up_tick = self.declare_parameter('x_lift_up_tick', 5461).get_parameter_value().integer_value
+        self.x_lift_center_tick = self.declare_parameter('x_lift_center_tick',2048).get_parameter_value().integer_value
+        self.x_lift_down_tick = self.declare_parameter('x_lift_down_tick',-1365).get_parameter_value().integer_value
+
         self.xl_back_id  = self.declare_parameter('xl_back_id', 7).get_parameter_value().integer_value
-        self.back_up_tick    = self.declare_parameter('back_up_tick',    4095).get_parameter_value().integer_value
-        self.back_center_tick= self.declare_parameter('back_center_tick',2048).get_parameter_value().integer_value
-        self.back_down_tick  = self.declare_parameter('back_down_tick',  0).get_parameter_value().integer_value
+        self.back_up_tick    = self.declare_parameter('back_up_tick',    -5120).get_parameter_value().integer_value
+        self.back_center_tick= self.declare_parameter('back_center_tick',0).get_parameter_value().integer_value
+        self.back_down_tick  = self.declare_parameter('back_down_tick',  5120).get_parameter_value().integer_value
+        self.back_down_45_tick  = self.declare_parameter('back_down_45_tick',  2560).get_parameter_value().integer_value
 
         self.grip_open_tick  = self.declare_parameter('grip_open_tick', 480).get_parameter_value().integer_value
         self.grip_close_tick = self.declare_parameter('grip_close_tick', 330).get_parameter_value().integer_value
@@ -89,17 +95,18 @@ class ArmController(Node):
         self.packet_x = PacketHandler(2.0)
 
         # AX-12A 초기 설정
-        for ax_id in [i for i in [self.ax_base_id, self.ax_lift_id, self.ax_grip_id] if i is not None]:
+        for ax_id in [i for i in [self.ax_base_id, self.ax_grip_id] if i is not None]:
             self.packet_ax.write1ByteTxRx(self.port, ax_id, self.AX_ADDR_TORQUE_ENABLE, self.TORQUE_DISABLE)
             self.packet_ax.write2ByteTxRx(self.port, ax_id, self.AX_ADDR_MOVING_SPEED, 100)
             self.packet_ax.write1ByteTxRx(self.port, ax_id, self.AX_ADDR_TORQUE_ENABLE, self.TORQUE_ENABLE)
         
-        # XL backlift init: Position mode(3)
-        self.packet_x.write1ByteTxRx(self.port, self.xl_back_id, self.ADDR_TORQUE_ENABLE, self.TORQUE_DISABLE)
-        self.packet_x.write1ByteTxRx(self.port, self.xl_back_id, self.ADDR_OPERATING_MODE, 3)
-        self.packet_x.write4ByteTxRx(self.port, self.xl_back_id, self.ADDR_PROFILE_ACCEL, 20)
-        self.packet_x.write4ByteTxRx(self.port, self.xl_back_id, self.ADDR_PROFILE_VELOCITY, 60)
-        self.packet_x.write1ByteTxRx(self.port, self.xl_back_id, self.ADDR_TORQUE_ENABLE, self.TORQUE_ENABLE)
+        # XM lift arm, XL backlift init: Position mode(3)
+        for x_id in [i for i in [self.x_lift_id, self.xl_back_id] if i is not None]:
+            self.packet_x.write1ByteTxRx(self.port, x_id, self.ADDR_TORQUE_ENABLE, self.TORQUE_DISABLE)
+            self.packet_x.write1ByteTxRx(self.port, x_id, self.ADDR_OPERATING_MODE, 4)
+            self.packet_x.write4ByteTxRx(self.port, x_id, self.ADDR_PROFILE_ACCEL, 20)
+            self.packet_x.write4ByteTxRx(self.port, x_id, self.ADDR_PROFILE_VELOCITY, 100)
+            self.packet_x.write1ByteTxRx(self.port, x_id, self.ADDR_TORQUE_ENABLE, self.TORQUE_ENABLE)
 
         # 팔 X-series 초기 설정
         for dxl_id in self.ids_x:
@@ -150,9 +157,9 @@ class ArmController(Node):
         self.z_offset = 0.0
         # 리미트!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         self.limits=[(-np.deg2rad(150), np.deg2rad(150)),
-                     (-np.deg2rad(0), np.deg2rad(180)),
-                     (-np.deg2rad(100), np.deg2rad(10)),
-                     (-np.deg2rad(100), np.deg2rad(10))]
+                     (-np.deg2rad(0), np.deg2rad(170)),
+                     (-np.deg2rad(90), np.deg2rad(5)),
+                     (-np.deg2rad(100), np.deg2rad(5))]
         
         #잘 되는지 테스트 필요
         # self.last_q = np.zeros(len(self.chain.links))
@@ -385,6 +392,7 @@ class ArmController(Node):
         c = msg.data.strip().lower()
         if   c == 'up':       tick = self.back_up_tick
         elif c == 'down':     tick = self.back_down_tick
+        elif c == 'down45':     tick = self.back_down_45_tick
         elif c in ('center','home'):
             tick = self.back_center_tick
         else:
@@ -393,7 +401,7 @@ class ArmController(Node):
 
     def on_gripper(self, msg: String):
         c = msg.data.strip().lower()
-        if   c == 'open':  tgt = self.
+        if   c == 'open':  tgt = self.grip_open_tick
         elif c == 'close': tgt = self.grip_close_tick
         elif c == 'close_fully': tgt = self.grip_close_fully_tick
         else:
@@ -402,11 +410,11 @@ class ArmController(Node):
 
     def on_lift(self, msg: String):
         c = msg.data.strip().lower()
-        if   c == 'down':   tgt = 0
-        elif c == 'center': tgt = 512
-        elif c == 'up':     tgt = 1023
+        if   c == 'down':   tgt = self.x_lift_down_tick
+        elif c == 'center': tgt = self.x_lift_center_tick
+        elif c == 'up':     tgt = self.x_lift_up_tick
         else: return
-        self.packet_ax.write2ByteTxRx(self.port, self.ax_lift_id, self.AX_ADDR_GOAL_POSITION, int(tgt))
+        self.packet_x.write4ByteTxRx(self.port, self.x_lift_id, self.ADDR_GOAL_POSITION, int(tgt))
 
         
 

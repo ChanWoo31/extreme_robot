@@ -70,7 +70,7 @@ class ArmController(Node):
         self.home_z = self.declare_parameter('home_z', 0.18525).get_parameter_value().double_value
         self.cart_step = self.declare_parameter('cart_step_m', 0.1).get_parameter_value().double_value  # 10 cm
         self.home = np.array([self.home_x, self.home_y, self.home_z], dtype=float)
-        # self.manual_offset = np.zeros(3, dtype=float)
+        self.manual_offset = np.zeros(3, dtype=float)
 
         self.base_step_deg = self.declare_parameter('base_step_deg', 5.0).get_parameter_value().double_value
 
@@ -130,7 +130,7 @@ class ArmController(Node):
             # Extended 포지션 모드 4번
             self.packet_x.write1ByteTxRx(self.port, dxl_id, self.ADDR_OPERATING_MODE, 4)
             # current limit
-            self.packet_x.write2ByteTxRx(self.port, dxl_id, self.ADDR_CURRENT_LIMIT, 300)
+            self.packet_x.write2ByteTxRx(self.port, dxl_id, self.ADDR_CURRENT_LIMIT, 500)
             # 가속/속도
             self.packet_x.write4ByteTxRx(self.port, dxl_id, self.ADDR_PROFILE_ACCEL, 10)
             self.packet_x.write4ByteTxRx(self.port, dxl_id, self.ADDR_PROFILE_VELOCITY, 100)
@@ -165,18 +165,18 @@ class ArmController(Node):
         # 역 ㄷ자 시작
         self.chain = Chain(name='arm4', links=[
             OriginLink(),
-            DHLink(d=d1, a=0, alpha=np.deg2rad(90), theta=0),
+            DHLink(d=d1, a=0, alpha=np.deg2rad(-90), theta=0),
             DHLink(d=0, a=a2, alpha=0, theta=np.deg2rad(0)),
-            DHLink(d=0, a=a3, alpha=0, theta=np.deg2rad(90)),
-            DHLink(d=0, a=a4, alpha=0, theta=np.deg2rad(90)),
+            DHLink(d=0, a=a3, alpha=0, theta=np.deg2rad(-90)),
+            DHLink(d=0, a=a4, alpha=0, theta=np.deg2rad(-90)),
         ]
         )
         self.z_offset = 0.0
         # 리미트!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         self.limits=[(-np.deg2rad(150), np.deg2rad(150)),
-                     (-np.deg2rad(0), np.deg2rad(170)),
-                     (-np.deg2rad(90), np.deg2rad(5)),
-                     (-np.deg2rad(100), np.deg2rad(5))]
+                     (-np.deg2rad(170), np.deg2rad(0)),
+                     (-np.deg2rad(5), np.deg2rad(90)),
+                     (-np.deg2rad(5), np.deg2rad(100))]
         
         #잘 되는지 테스트 필요
         # self.last_q = np.zeros(len(self.chain.links))
@@ -186,9 +186,7 @@ class ArmController(Node):
         
         self.init_last_q_from_present()
         # self.go_home()
-
         
-
 
     def int32_to_le(self, v:int):
         v &= 0xFFFFFFFF
@@ -207,9 +205,17 @@ class ArmController(Node):
         self.sync_write.txPacket()
 
     def send_ax_base_deg(self, deg):
+        # 각도 리미트 확인
+        deg_rad = np.deg2rad(deg)
+        lo, hi = self.limits[0]
+        if deg_rad < lo or deg_rad > hi:
+            self.get_logger().warn(f"Base angle {deg:.1f}° blocked by limit (limit: {np.rad2deg(lo):.1f}° ~ {np.rad2deg(hi):.1f}°)")
+            return False
+
         ax_ticks = int(round((deg / 300.0) * 1023.0)) + 512
         ax_ticks = max(0, min(1023, ax_ticks))
         self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, ax_ticks)
+        return True
 
     def gripper(self, close: bool):
         if self.ax_grip_id is None: return
@@ -218,12 +224,22 @@ class ArmController(Node):
 
     def stop_hold(self):
         pos_ax,_,_ = self.packet_ax.read2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_PRESENT_POS)
-        self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, pos_ax)
+        # 현재 위치 리미트 체크
+        curr_rad = self.ticks_to_joint_rad(0, pos_ax)
+        lo, hi = self.limits[0]
+        if curr_rad < lo or curr_rad > hi:
+            self.get_logger().warn(f"Current base position {np.rad2deg(curr_rad):.1f}° violates limits, holding at safe position")
+            # 안전한 위치로 이동 (0도)
+            self.send_ax_base_deg(0.0)
+        else:
+            self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, pos_ax)
         self.send_x_positions(*[ (self.last_q[i+1]) for i in range(3)])
 
     def go_home(self):
         q = [0.0, 0.0, 0.0, 0.0]
-        self.send_ax_base_deg(np.rad2deg(q[0]) * self.dir[0])
+        if not self.send_ax_base_deg(np.rad2deg(q[0]) * self.dir[0]):
+            self.get_logger().warn("Home position blocked due to base limit violation")
+            return
         self.send_x_positions(q[1], q[2] ,q[3])
         tmp = np.zeros(len(self.chain.links)); tmp[1:5] = q; self.last_q = tmp
 
@@ -273,7 +289,9 @@ class ArmController(Node):
             if q[i] < lo: q[i] = lo
             if q[i] > hi: q[i] = hi
 
-        self.send_ax_base_deg(np.rad2deg(q[0]) * self.dir[0])
+        if not self.send_ax_base_deg(np.rad2deg(q[0]) * self.dir[0]):
+            self.get_logger().warn("IK move blocked due to base limit violation")
+            return
         self.send_x_positions(q[1], q[2] ,q[3])
         tmp = self.last_q.copy(); tmp[1:5] = q; self.last_q = tmp
 
@@ -282,10 +300,14 @@ class ArmController(Node):
         err = np.linalg.norm(reach - np.array([x, y, z]))
         self.get_logger().info(f"FK reach=({reach[0]:.5f},{reach[1]:.5f},{reach[2]:.5f}), err={err*1000:.3f} mm")
 
+        # manual_offset을 실제 도달한 위치로 업데이트
+        self.manual_offset[:] = np.array([x, y, z]) - self.home
+
     def go_home_ticks(self):
         # 베이스 AX 복귀
-        self.base_goal = int(self.base_home_tick)
+        self.base_goal = int(self.base_home_tick)  # 512로 리셋
         self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, self.base_goal)
+        self.get_logger().info(f"Home: base_goal reset to {self.base_goal}")
 
         # J2~J4 XL 복귀(GroupSyncWrite)
         self.sync_write.clearParam()
@@ -300,6 +322,10 @@ class ArmController(Node):
         q3 = self.ticks_to_joint_rad(3, self.xl_home_ticks[2])
         self.last_q[1:5] = [q0, q1, q2, q3]
 
+        # manual_offset도 초기화
+        self.manual_offset[:] = 0.0
+        self.get_logger().info(f"Home: manual_offset reset to {self.manual_offset}")
+
     def goto_xyz(self, x, y, z):
         """임의 좌표로 점프 + 이후 조그는 이 지점에서 계속 누적"""
         # 1) IK로 이동
@@ -309,7 +335,16 @@ class ArmController(Node):
 
     def base_rotate_deg(self, delta_deg: float, wait_s: float = 0.0):
         dtick = int(round(delta_deg * AX_TICKS_PER_DEG))
-        self.base_goal = max(0, min(1023, self.base_goal + dtick))
+        new_goal = self.base_goal + dtick
+
+        # 각도 리미트 확인
+        new_rad = self.ticks_to_joint_rad(0, new_goal)
+        lo, hi = self.limits[0]
+        if new_rad < lo or new_rad > hi:
+            self.get_logger().warn(f"Base rotation blocked by limit: {np.rad2deg(new_rad):.1f}° (limit: {np.rad2deg(lo):.1f}° ~ {np.rad2deg(hi):.1f}°)")
+            return
+
+        self.base_goal = max(0, min(1023, new_goal))
         self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, int(self.base_goal))
         # IK 초기값 동기 (J1 라디안 재계산)
         self.last_q[1] = self.ticks_to_joint_rad(0, self.base_goal)
@@ -374,14 +409,28 @@ class ArmController(Node):
 
         # 왼/오 → AX 베이스 틱 증분
         if c in ('left','l','right','r'):
-            dtick = int(round(self.base_step_deg * AX_TICKS_PER_DEG))
-            if c in ('left','l'):
-                self.base_goal = min(1023, self.base_goal + dtick)
-            else:
-                self.base_goal = max(0,    self.base_goal - dtick)
+            delta_deg = self.base_step_deg if c in ('left','l') else -self.base_step_deg
+            dtick = int(round(delta_deg * AX_TICKS_PER_DEG))
+            old_goal = self.base_goal
+            new_goal = self.base_goal + dtick
+
+            # 각도 리미트 확인
+            new_rad = self.ticks_to_joint_rad(0, new_goal)
+            lo, hi = self.limits[0]
+            if new_rad < lo or new_rad > hi:
+                self.get_logger().warn(f"Base {c} blocked by limit: {np.rad2deg(new_rad):.1f}° (limit: {np.rad2deg(lo):.1f}° ~ {np.rad2deg(hi):.1f}°)")
+                return
+
+            self.base_goal = max(0, min(1023, new_goal))
+            self.get_logger().info(f"Base {c}: {old_goal} -> {self.base_goal} (step={dtick})")
             self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, int(self.base_goal))
-            # IK 초기값 동기
+            # IK 초기값 동기 - 베이스만이 아니라 모든 조인트 현재 위치 읽어서 동기화
             self.last_q[1] = self.ticks_to_joint_rad(0, self.base_goal)
+            # 다른 조인트들도 현재 위치 읽어서 동기화
+            for j, dxl_id in enumerate(self.ids_x, start=2):  # J2, J3, J4
+                pos, res, err = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
+                if res == 0 and err == 0:
+                    self.last_q[j] = self.ticks_to_joint_rad(j-1, int(pos))
             return
 
         # 앞/뒤/위/아래 → 홈 기준 누적 후 IK

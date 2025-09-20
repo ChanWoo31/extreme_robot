@@ -111,18 +111,18 @@ class ArmController(Node):
         # 역 ㄷ자 시작
         self.chain = Chain(name='arm4', links=[
             OriginLink(),
-            DHLink(d=d1, a=0, alpha=np.deg2rad(90), theta=0),
+            DHLink(d=d1, a=0, alpha=np.deg2rad(-90), theta=0),
             DHLink(d=0, a=a2, alpha=0, theta=np.deg2rad(0)),
-            DHLink(d=0, a=a3, alpha=0, theta=np.deg2rad(90)),
-            DHLink(d=0, a=a4, alpha=0, theta=np.deg2rad(90)),
+            DHLink(d=0, a=a3, alpha=0, theta=np.deg2rad(-90)),
+            DHLink(d=0, a=a4, alpha=0, theta=np.deg2rad(-90)),
         ]
         )
         self.z_offset = 0.0
         # 리미트!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         self.limits=[(-np.deg2rad(150), np.deg2rad(150)),
-                     (-np.deg2rad(0), np.deg2rad(180)),
-                     (-np.deg2rad(100), np.deg2rad(10)),
-                     (-np.deg2rad(100), np.deg2rad(10))]
+                     (-np.deg2rad(180), np.deg2rad(0)),
+                     (-np.deg2rad(10), np.deg2rad(100)),
+                     (-np.deg2rad(10), np.deg2rad(100))]
         
         #잘 되는지 테스트 필요
         # self.last_q = np.zeros(len(self.chain.links))

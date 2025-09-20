@@ -114,10 +114,16 @@ class ArmController(Node):
         )
         self.z_offset = 0.0
         # 리미트!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        # self.limits=[(-np.deg2rad(150), np.deg2rad(150)),
+        #              (-np.deg2rad(5), np.deg2rad(180)),
+        #              (-np.deg2rad(100), np.deg2rad(10)),
+        #              (-np.deg2rad(100), np.deg2rad(10))]
+        
+        # 위에보다 더 보수적인 리미트.
         self.limits=[(-np.deg2rad(150), np.deg2rad(150)),
-                     (-np.deg2rad(5), np.deg2rad(180)),
-                     (-np.deg2rad(100), np.deg2rad(10)),
-                     (-np.deg2rad(100), np.deg2rad(10))]
+                     (-np.deg2rad(0), np.deg2rad(170)),
+                     (-np.deg2rad(90), np.deg2rad(5)),
+                     (-np.deg2rad(100), np.deg2rad(5))]
         
         #잘 되는지 테스트 필요
         # self.last_q = np.zeros(len(self.chain.links))

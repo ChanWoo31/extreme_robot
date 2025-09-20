@@ -23,7 +23,7 @@ class ArmController(Node):
         #     Point, 'target_point', self.on_point, 10
         # )
         
-        self.DEVICENAME = '/dev/ttyUSB0'
+        self.DEVICENAME = '/dev/ttyROBOTARM'
         self.BAUDRATE = 1000000
         self.ax_base_id = 1   # 베이스 J1
         self.ax_grip_id = 5   # 그리퍼
@@ -70,7 +70,7 @@ class ArmController(Node):
         self.home_z = self.declare_parameter('home_z', 0.18525).get_parameter_value().double_value
         self.cart_step = self.declare_parameter('cart_step_m', 0.1).get_parameter_value().double_value  # 10 cm
         self.home = np.array([self.home_x, self.home_y, self.home_z], dtype=float)
-        self.manual_offset = np.zeros(3, dtype=float)
+        # self.manual_offset = np.zeros(3, dtype=float)
 
         self.base_step_deg = self.declare_parameter('base_step_deg', 5.0).get_parameter_value().double_value
 
@@ -110,6 +110,23 @@ class ArmController(Node):
 
         # 팔 X-series 초기 설정
         for dxl_id in self.ids_x:
+            # # 초기 위치 정밀 세팅을 위한 포지션 모드 3번
+            # self.packet_x.write1ByteTxRx(self.port, dxl_id, self.ADDR_OPERATING_MODE, 3)
+            # # 틱값 2800으로 이동
+            # self.packet_x.write4ByteTxRx(self.port, dxl_id, self.ADDR_GOAL_POSITION, 2800)
+            # time.sleep(0.5)  # 잠시 대기
+            # # 위치 도달 대기
+            # self.write_goal_and_wait(dxl_id, 2800, tol=16, timeout=3.0)
+            # # 토크 끄고
+            # self.packet_x.write1ByteTxRx(self.port, dxl_id, self.ADDR_TORQUE_ENABLE, self.TORQUE_DISABLE)
+            # time.sleep(0.1)
+            # # 역 ㄷ자에 맞게 홈 오프셋 설정 (엔코더 0점 보정)
+            # self.packet_x.write4ByteTxRx(self.port, dxl_id, 20, 2800)
+            # time.sleep(0.1)
+            # # 다시 토크 온
+            # self.packet_x.write1ByteTxRx(self.port, dxl_id, self.ADDR_TORQUE_ENABLE, self.TORQUE_ENABLE)
+            # time.sleep(0.1)
+            # # 이제부터는 Extended 포지션 모드 4번
             # Extended 포지션 모드 4번
             self.packet_x.write1ByteTxRx(self.port, dxl_id, self.ADDR_OPERATING_MODE, 4)
             # current limit
@@ -282,9 +299,6 @@ class ArmController(Node):
         q2 = self.ticks_to_joint_rad(2, self.xl_home_ticks[1])
         q3 = self.ticks_to_joint_rad(3, self.xl_home_ticks[2])
         self.last_q[1:5] = [q0, q1, q2, q3]
-
-        # 매뉴얼 오프셋 리셋
-        self.manual_offset[:] = 0.0
 
     def goto_xyz(self, x, y, z):
         """임의 좌표로 점프 + 이후 조그는 이 지점에서 계속 누적"""

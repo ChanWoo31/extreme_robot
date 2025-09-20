@@ -10,6 +10,7 @@ from rclpy.node import Node
 from dynamixel_sdk import PortHandler, PacketHandler, GroupSyncWrite
 
 from arm_interfaces.srv import ArmDoTask
+from arm_interfaces.msg import DetectedObject
 
 d1 = 0
 a2, a3, a4 = 0.18525, 0.18525, 0.256
@@ -21,8 +22,19 @@ class ArmController(Node):
     def __init__(self):
         super().__init__('arm_controller')
         self.srv = self.create_service(ArmDoTask, 'arm_do_task', self.handle_arm_do_task)
+
+        # 자동 감지 시스템
+        self.detected_sub = self.create_subscription(
+            DetectedObject, 'detected_objects', self.handle_detected_object, 10
+        )
+        self.auto_task_map = {
+            'box': 'pick',
+            'button': 'press_button',
+            'handle': 'open_handle',
+            # 필요에 따라 추가
+        }
         
-        self.DEVICENAME = '/dev/ttyUSB0'
+        self.DEVICENAME = '/dev/ttyROBOTARM'
         self.BAUDRATE = 1000000
         self.ax_base_id = 1   # 베이스 J1
         self.ax_grip_id = 5   # 그리퍼
@@ -135,6 +147,10 @@ class ArmController(Node):
         self.dt = 0.02 # 50Hz
         # self.go_home()
 
+        # 카메라-엔드이펙터 변환 매트릭스 (수정 가능)
+        self.camera_offset = np.array([0.0, 0.0, 0.05])  # 카메라가 엔드이펙터에서 +Z 방향으로 5cm
+        self.camera_rotation = np.eye(3)  # 회전 없음 (필요시 수정)
+
     # 유틸
 
     def int32_to_le(self, v:int):
@@ -236,15 +252,36 @@ class ArmController(Node):
     #     finally:
     #         self.block_until = time.time() + self.block_sec
     def solve_ik_q(self, x, y, z):
-        ik = self.chain.inverse_kinematics(
-            target_position=[-x, y, z],
-            orientation_mode=None,
-            initial_position=self.last_q,
-        )
-        q = list(ik[1:5])
-        for i, (lo, hi) in enumerate(self.limits):
-            if q[i] < lo or q[i] > hi: return None
-        return q
+        # 여러 초기값으로 IK 시도하여 리미트 내 해 찾기
+        initial_positions = [
+            self.last_q,  # 현재 자세
+            np.array([0, 0, 0, 0, 0]),  # 홈 포지션
+            np.array([0, 0, np.deg2rad(90), 0, 0]),  # 다른 시작점
+        ]
+
+        for init_q in initial_positions:
+            try:
+                ik = self.chain.inverse_kinematics(
+                    target_position=[-x, y, z],
+                    orientation_mode=None,
+                    initial_position=init_q,
+                )
+                q = list(ik[1:5])
+
+                # 리미트 체크
+                valid = True
+                for i, (lo, hi) in enumerate(self.limits):
+                    if q[i] < lo or q[i] > hi:
+                        valid = False
+                        break
+
+                if valid:
+                    return q
+            except:
+                continue
+
+        self.get_logger().warn(f"IK failed for target ({x:.3f}, {y:.3f}, {z:.3f}) - no valid solution within limits")
+        return None
     
     def send_q(self, q):
         self.send_ax_base_deg(np.rad2deg(q[0]) * self.dir[0])
@@ -268,6 +305,23 @@ class ArmController(Node):
     def fk_tip(self):
         T = self.chain.forward_kinematics(self.last_q)
         return T[:3, 3]
+
+    def camera_to_base(self, camera_xyz):
+        """카메라 좌표를 로봇 베이스 좌표계로 변환"""
+        camera_xyz = np.array(camera_xyz, dtype=float)
+
+        # 현재 엔드이펙터 위치와 자세 구하기
+        T_base_to_ee = self.chain.forward_kinematics(self.last_q)
+        ee_pos = T_base_to_ee[:3, 3]
+        ee_rot = T_base_to_ee[:3, :3]
+
+        # 카메라 좌표를 엔드이펙터 좌표계로 변환
+        camera_in_ee = self.camera_rotation @ camera_xyz + self.camera_offset
+
+        # 엔드이펙터 좌표계를 베이스 좌표계로 변환
+        base_xyz = ee_rot @ camera_in_ee + ee_pos
+
+        return base_xyz
     
     # 프리미티브(접근/이탈)
 
@@ -311,18 +365,49 @@ class ArmController(Node):
     # 서비스 핸들러
     def handle_arm_do_task(self, request, response):
         x, y, z, task = request.x, request.y, request.z, request.task
-        p = np.array([x, y, z], dtype=float)
+        camera_coord = np.array([x, y, z], dtype=float)
+
+        # 카메라 좌표를 베이스 좌표로 변환
+        base_coord = self.camera_to_base(camera_coord)
+        self.get_logger().info(f"Camera coord: {camera_coord}, Base coord: {base_coord}")
 
         ok = False
-        if task == 'press_button': ok = self.press_button_seq(p)
-        elif task == 'open_handle': ok = self. turn_handle_seq(p)
-        elif task == 'pick': ok = self.pick_seq(p)
-        elif task == 'place': ok = self.place_seq(p)
+        if task == 'press_button': ok = self.press_button_seq(base_coord)
+        elif task == 'open_handle': ok = self. turn_handle_seq(base_coord)
+        elif task == 'pick': ok = self.pick_seq(base_coord)
+        elif task == 'place': ok = self.place_seq(base_coord)
+        elif task == 'move_to_coord': ok = self.move_ik(*base_coord)
         else:
             response.success = False; response.message = f'Unknown task {task}'; return response
         response.success = bool(ok)
         response.message = 'done' if ok else 'failed'
         return response
+
+    def handle_detected_object(self, msg):
+        """감지된 물체에 대해 자동으로 동작 수행"""
+        object_name = msg.object_name.lower()
+
+        if object_name not in self.auto_task_map:
+            self.get_logger().info(f"Unknown object detected: {object_name}")
+            return
+
+        task = self.auto_task_map[object_name]
+        camera_coord = np.array([msg.x, msg.y, msg.z], dtype=float)
+
+        self.get_logger().info(f"Auto-executing {task} for {object_name} at {camera_coord}")
+
+        # 카메라 좌표를 베이스 좌표로 변환
+        base_coord = self.camera_to_base(camera_coord)
+
+        # 해당 시퀀스 실행
+        ok = False
+        if task == 'press_button': ok = self.press_button_seq(base_coord)
+        elif task == 'open_handle': ok = self.turn_handle_seq(base_coord)
+        elif task == 'pick': ok = self.pick_seq(base_coord)
+        elif task == 'place': ok = self.place_seq(base_coord)
+
+        result = "SUCCESS" if ok else "FAILED"
+        self.get_logger().info(f"Auto task {task} for {object_name}: {result}")
 
 
 def main():

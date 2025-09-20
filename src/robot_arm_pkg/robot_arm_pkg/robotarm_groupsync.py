@@ -7,6 +7,7 @@ from ikpy.chain import Chain
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Point
+from std_msgs.msg import String
 from dynamixel_sdk import PortHandler, PacketHandler, GroupSyncWrite
 
 d1 = 0
@@ -21,8 +22,12 @@ class ArmController(Node):
         self.sub = self.create_subscription(
             Point, 'target_point', self.on_point, 10
         )
+
+        self.sub_cmd = self.create_subscription(
+            String, 'arm/cmd', self.on_cmd, 10
+        )
         
-        self.DEVICENAME = '/dev/ttyUSB0'
+        self.DEVICENAME = '/dev/ttyUSB1'
         self.BAUDRATE = 1000000
         self.ax_base_id = 1   # 베이스 J1
         self.ax_grip_id = 5   # 그리퍼
@@ -176,11 +181,24 @@ class ArmController(Node):
     def init_last_q_from_present(self):
         q = [0.0]*4
         ax_pos,_,_ = self.packet_ax.read2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_PRESENT_POS)
+
+        # 홈 틱을 무조건 512로 지정
+        self.base_home_tick = 512
+        self.base_goal = 512
+        self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id,
+                                    self.AX_ADDR_GOAL_POSITION,
+                                    self.base_home_tick)
+
+        self.xl_home_ticks = []
         q[0] = self.ticks_to_joint_rad(0, ax_pos)
         for j, dxl_id in enumerate(self.ids_x, start=1):  # j=1..3 → J2..J4
             pos, res, err = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
             if res==0 and err==0:
+                self.xl_home_ticks.append(int(pos))       # 홈 틱 저장
                 q[j] = self.ticks_to_joint_rad(j, int(pos))
+            else:
+                self.xl_home_ticks.append(0)
+
         self.last_q = np.zeros(len(self.chain.links))
         self.last_q[1:5] = q
         self.get_logger().info(f"Init last_q(deg)={np.rad2deg(self.last_q[1:5])}")
@@ -207,6 +225,24 @@ class ArmController(Node):
         err = np.linalg.norm(reach - np.array([x, y, z]))
         self.get_logger().info(f"FK reach=({reach[0]:.5f},{reach[1]:.5f},{reach[2]:.5f}), err={err*1000:.3f} mm")
 
+    def go_home_ticks(self):
+        # 베이스 AX 복귀
+        self.base_goal = int(self.base_home_tick)
+        self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, self.base_goal)
+
+        # J2~J4 XL 복귀(GroupSyncWrite)
+        self.sync_write.clearParam()
+        for dxl_id, t in zip(self.ids_x, self.xl_home_ticks):
+            self.sync_write.addParam(dxl_id, self.int32_to_le(int(t)))
+        self.sync_write.txPacket()
+
+        # IK 내부 상태 동기
+        q0 = self.ticks_to_joint_rad(0, self.base_home_tick)
+        q1 = self.ticks_to_joint_rad(1, self.xl_home_ticks[0])
+        q2 = self.ticks_to_joint_rad(2, self.xl_home_ticks[1])
+        q3 = self.ticks_to_joint_rad(3, self.xl_home_ticks[2])
+        self.last_q[1:5] = [q0, q1, q2, q3]
+
     def on_point(self, msg: Point):
         now = time.time()
         if now < self.block_until:
@@ -224,6 +260,14 @@ class ArmController(Node):
             self.stop_hold()
         finally:
             self.block_until = time.time() + self.block_sec
+
+    def on_cmd(self, msg: String):
+        cmd = msg.data.strip().lower()
+        if cmd == 'home':
+            self.get_logger().info('Command: home -> go_home_ticks()')
+            self.go_home_ticks()
+        else:
+            self.get_logger().warn(f'Unknown command: {cmd}')
 
 
         

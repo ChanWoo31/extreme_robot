@@ -13,10 +13,7 @@ def getch(timeout=0.1):
 class KeyTeleop(Node):
     def __init__(self):
         super().__init__('key_teleop')
-        self.pub_arm   = self.create_publisher(String, '/arm/cmd/manual', 10)
-        self.pub_lift  = self.create_publisher(String, '/lift/cmd/manual', 10)
-        self.pub_back  = self.create_publisher(String, '/back_lift/cmd/manual', 10)
-        self.pub_grip  = self.create_publisher(String, '/gripper/cmd/manual', 10)
+        self.pub_manual = self.create_publisher(String, '/arm/manual', 10)
 
         self.get_logger().info("start key teleop")
 
@@ -29,30 +26,30 @@ class KeyTeleop(Node):
             return True
 
         # 팔 이동
-        if   ch == 'q': self.send(self.pub_arm, 'front')
-        elif ch == 'e': self.send(self.pub_arm, 'back')
-        elif ch == 'w': self.send(self.pub_arm, 'up')
-        elif ch == 's': self.send(self.pub_arm, 'down')
-        elif ch == 'a': self.send(self.pub_arm, 'left')
-        elif ch == 'd': self.send(self.pub_arm, 'right')
-        elif ch == 'b': self.send(self.pub_arm, 'branch_clear')
-        elif ch == '`': self.send(self.pub_arm, 'home')
+        if   ch == 'q': self.send(self.pub_manual, 'front')
+        elif ch == 'e': self.send(self.pub_manual, 'back')
+        elif ch == 'w': self.send(self.pub_manual, 'up')
+        elif ch == 's': self.send(self.pub_manual, 'down')
+        elif ch == 'a': self.send(self.pub_manual, 'left')
+        elif ch == 'd': self.send(self.pub_manual, 'right')
+        elif ch == 'b': self.send(self.pub_manual, 'branch_clear')
+        elif ch == '`': self.send(self.pub_manual, 'home')
 
         # 앞 리프트
-        elif ch == 'z': self.send(self.pub_lift, 'up')
-        elif ch == 'x': self.send(self.pub_lift, 'center')
-        elif ch == 'c': self.send(self.pub_lift, 'down')
+        elif ch == 'z': self.send(self.pub_manual, 'flift_up')
+        elif ch == 'x': self.send(self.pub_manual, 'flift_center')
+        elif ch == 'c': self.send(self.pub_manual, 'flift_down')
 
         # 뒤 리프트
-        elif ch == '1': self.send(self.pub_back, 'up')
-        elif ch == '2': self.send(self.pub_back, 'center')
-        elif ch == '3': self.send(self.pub_back, 'down')
-        elif ch == '4': self.send(self.pub_back, 'down45')
+        elif ch == '1': self.send(self.pub_manual, 'blift_up')
+        elif ch == '2': self.send(self.pub_manual, 'blift_center')
+        elif ch == '3': self.send(self.pub_manual, 'blift_down')
+        elif ch == '4': self.send(self.pub_manual, 'blift_down45')
 
         # 그리퍼
-        elif ch == 'h': self.send(self.pub_grip, 'open')
-        elif ch == 'g': self.send(self.pub_grip, 'close')
-        elif ch == 'j': self.send(self.pub_grip, 'close_fully')
+        elif ch == 'h': self.send(self.pub_manual, 'open')
+        elif ch == 'g': self.send(self.pub_manual, 'close')
+        elif ch == 'j': self.send(self.pub_manual, 'close_fully')
 
         return True
 

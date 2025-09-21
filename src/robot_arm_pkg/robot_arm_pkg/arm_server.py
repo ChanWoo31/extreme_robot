@@ -299,7 +299,7 @@ class ArmController(Node):
         for init_q in initial_positions:
             try:
                 ik = self.chain.inverse_kinematics(
-                    target_position=[x, y, z],
+                    target_position=[-x, y, z],
                     orientation_mode=None,
                     initial_position=init_q,
                 )

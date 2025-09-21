@@ -9,7 +9,7 @@ class SerialReceiver(Node):
         self.publisher_ = self.create_publisher(String, '/arm/manual', 10)
 
         # 아두이노 포트와 보드레이트 맞춰야 함
-        self.ser = serial.Serial('/dev/ttyACM0', 9600, timeout=1)
+        self.ser = serial.Serial('/dev/ttyACM0', 115200, timeout=1)
 
         self.create_timer(0.1, self.read_serial)
 

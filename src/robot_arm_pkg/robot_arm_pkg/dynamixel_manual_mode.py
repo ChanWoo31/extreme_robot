@@ -74,11 +74,8 @@ class ArmController(Node):
 
         self.base_step_deg = self.declare_parameter('base_step_deg', 5.0).get_parameter_value().double_value
 
-        # ---- 추가 구독 ----
-        self.sub_arm_manual  = self.create_subscription(String, '/arm/cmd/manual',       self.on_arm_manual, 50)
-        self.sub_lift        = self.create_subscription(String, '/lift/cmd/manual',      self.on_lift, 20)
-        self.sub_back_lift   = self.create_subscription(String, '/back_lift/cmd/manual', self.on_back_lift, 20)
-        self.sub_gripper     = self.create_subscription(String, '/gripper/cmd/manual',   self.on_gripper, 20)
+        # ---- 통합 구독 ----
+        self.sub_manual = self.create_subscription(String, '/arm/manual', self.on_manual_command, 50)
 
         # 포트
         self.port = PortHandler(self.DEVICENAME)
@@ -285,7 +282,7 @@ class ArmController(Node):
             return
 
         ik = self.chain.inverse_kinematics(
-            target_position=[x, y, z],
+            target_position=[-x, y, z],
             orientation_mode=None,
             initial_position=self.last_q,
         )
@@ -394,7 +391,7 @@ class ArmController(Node):
             time.sleep(0.01)
         return False
 
-    def on_arm_manual(self, msg: String):
+    def on_manual_command(self, msg: String):
         c = msg.data.strip().lower()
         s = self.cart_step
 
@@ -449,40 +446,75 @@ class ArmController(Node):
             except Exception:
                 self.get_logger().warn('usage: step <meters>')
             return
-        else:
-            self.get_logger().warn(f'unknown cmd: {c}'); return
 
+        # Back lift commands
+        elif c == 'blift_up':
+            tick = self.back_up_tick
+            self.packet_x.write4ByteTxRx(self.port, self.xl_back_id, self.ADDR_GOAL_POSITION, int(tick))
+            return
+        elif c == 'blift_down':
+            tick = self.back_down_tick
+            self.packet_x.write4ByteTxRx(self.port, self.xl_back_id, self.ADDR_GOAL_POSITION, int(tick))
+            return
+        elif c == 'downblift_down4545':
+            tick = self.back_down_45_tick
+            self.packet_x.write4ByteTxRx(self.port, self.xl_back_id, self.ADDR_GOAL_POSITION, int(tick))
+            return
+        elif c in ('blift_center'):
+            tick = self.back_center_tick
+            self.packet_x.write4ByteTxRx(self.port, self.xl_back_id, self.ADDR_GOAL_POSITION, int(tick))
+            return
+
+        # Gripper commands
+        elif c == 'open':
+            tgt = self.grip_open_tick
+            self.packet_ax.write2ByteTxRx(self.port, self.ax_grip_id, self.AX_ADDR_GOAL_POSITION, int(tgt))
+            return
+        elif c == 'close':
+            tgt = self.grip_close_tick
+            self.packet_ax.write2ByteTxRx(self.port, self.ax_grip_id, self.AX_ADDR_GOAL_POSITION, int(tgt))
+            return
+        elif c == 'close_fully':
+            tgt = self.grip_close_fully_tick
+            self.packet_ax.write2ByteTxRx(self.port, self.ax_grip_id, self.AX_ADDR_GOAL_POSITION, int(tgt))
+            return
+
+        # Lift commands
+        elif c == 'flift_down':
+            tgt = self.x_lift_down_tick
+            self.packet_x.write4ByteTxRx(self.port, self.x_lift_id, self.ADDR_GOAL_POSITION, int(tgt))
+            return
+        elif c == 'flift_center':
+            tgt = self.x_lift_center_tick
+            self.packet_x.write4ByteTxRx(self.port, self.x_lift_id, self.ADDR_GOAL_POSITION, int(tgt))
+            return
+        elif c == 'flift_up':
+            tgt = self.x_lift_up_tick
+            self.packet_x.write4ByteTxRx(self.port, self.x_lift_id, self.ADDR_GOAL_POSITION, int(tgt))
+            return
+
+        # Arduino commands (pass through, no action needed here)
+        elif c in ('go', 'stop'):
+            return
+
+        # Movement commands (앞/뒤/위/아래)
+        elif c in ('front','f'):
+            self.manual_offset[0] += s
+        elif c in ('back','b'):
+            self.manual_offset[0] -= s
+        elif c in ('up','u'):
+            self.manual_offset[2] += s
+        elif c in ('down','d'):
+            self.manual_offset[2] -= s
+        else:
+            self.get_logger().warn(f'unknown cmd: {c}')
+            return
+
+        # IK 이동 (movement commands의 경우에만 실행)
         tgt = self.home + self.manual_offset
         self.move_ik(tgt[0], tgt[1], tgt[2])
 
 
-    def on_back_lift(self, msg: String):
-        c = msg.data.strip().lower()
-        if   c == 'up':       tick = self.back_up_tick
-        elif c == 'down':     tick = self.back_down_tick
-        elif c == 'down45':     tick = self.back_down_45_tick
-        elif c in ('center','home'):
-            tick = self.back_center_tick
-        else:
-            self.get_logger().warn('use: up|down|center'); return
-        self.packet_x.write4ByteTxRx(self.port, self.xl_back_id, self.ADDR_GOAL_POSITION, int(tick))
-
-    def on_gripper(self, msg: String):
-        c = msg.data.strip().lower()
-        if   c == 'open':  tgt = self.grip_open_tick
-        elif c == 'close': tgt = self.grip_close_tick
-        elif c == 'close_fully': tgt = self.grip_close_fully_tick
-        else:
-            self.get_logger().warn('use: open|close'); return
-        self.packet_ax.write2ByteTxRx(self.port, self.ax_grip_id, self.AX_ADDR_GOAL_POSITION, int(tgt))
-
-    def on_lift(self, msg: String):
-        c = msg.data.strip().lower()
-        if   c == 'down':   tgt = self.x_lift_down_tick
-        elif c == 'center': tgt = self.x_lift_center_tick
-        elif c == 'up':     tgt = self.x_lift_up_tick
-        else: return
-        self.packet_x.write4ByteTxRx(self.port, self.x_lift_id, self.ADDR_GOAL_POSITION, int(tgt))
 
         
 

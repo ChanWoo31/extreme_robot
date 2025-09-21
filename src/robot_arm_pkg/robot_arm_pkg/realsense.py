@@ -6,7 +6,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pyrealsense2 as rs
 from ultralytics import YOLO
 
-# ---------- MJPEG 서버 ----------
+# ---- ROS2 (rclpy) ----
+import rclpy
+from std_msgs.msg import String
+
+# ---- mjpg-streamer ----
+import subprocess
+import shutil
+
+# ---------- MJPEG 서버 (RealSense+YOLO) ----------
+
 LATEST_JPEG = None
 JPEG_LOCK = threading.Lock()
 
@@ -34,7 +43,6 @@ class MJPEGHandler(BaseHTTPRequestHandler):
                 self.wfile.write(f"Content-Length: {len(frame)}\r\n\r\n".encode("ascii"))
                 self.wfile.write(frame)
                 self.wfile.write(b"\r\n")
-                # 전송 속도 제어
                 time.sleep(1/30)
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -45,7 +53,64 @@ def start_mjpeg_server(host="0.0.0.0", port=8080):
     t.start()
     return httpd
 
-# ---------- 기존 RealSense + YOLO ----------
+# ---------- mjpg-streamer (일반 웹캠용) ----------
+def start_mjpg_streamer(
+    device="4",
+    width=640,
+    height=480,
+    fps=30,
+    port=8090,
+    yuyv=False,
+    extra_input_args=None,
+    extra_output_args=None,
+):
+    if shutil.which("mjpg_streamer") is None:
+        raise RuntimeError("mjpg_streamer 실행 파일을 찾을 수 없습니다. 설치를 확인하세요.")
+
+    input_plugin = "input_uvc.so"
+    output_plugin = "output_http.so"
+
+    input_args = [
+        input_plugin,
+        "-d", device,
+        "-r", f"{width}x{height}",
+        "-f", str(fps),
+    ]
+    if yuyv:
+        input_args.append("-y")
+
+    if extra_input_args:
+        input_args.extend(extra_input_args)
+
+    output_args = [
+        output_plugin,
+        "-p", str(port),
+        "-w", "/usr/local/share/mjpg-streamer/www"
+    ]
+    if extra_output_args:
+        output_args.extend(extra_output_args)
+
+    cmd = ["mjpg_streamer", "-i", " ".join(input_args), "-o", " ".join(output_args)]
+    print("[mjpg-streamer] CMD:", " ".join(cmd))
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    time.sleep(0.8)
+    return proc
+
+def stop_mjpg_streamer(proc: subprocess.Popen):
+    if proc is None:
+        return
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    except Exception:
+        pass
+
+# ---------- RealSense + YOLO ----------
+
 class RealSense:
     def __init__(self):
         self.TIMEOUT_MS = 150000
@@ -131,12 +196,33 @@ class RealSense:
         return np.array([Zc, -Xc, -Yc], dtype=np.float32)
 
 def main():
+    # ---- ROS2 노드 & 퍼블리셔 초기화 ----
+    rclpy.init()
+    node = rclpy.create_node('yolo_realsense_mjpeg')
+    pub_names = node.create_publisher(String, '/detected_object_names', 10)
+
+    # ---- RealSense + YOLO (파이썬 내장 MJPEG 서버, 8080) ----
     rsys = RealSense()
     httpd = start_mjpeg_server(host="0.0.0.0", port=8080)
-    print("MJPEG: http://<호스트IP>:8080/stream.mjpg")
+    node.get_logger().info("RealSense+YOLO MJPEG: http://<호스트IP>:8080/stream.mjpg")
+
+    # ---- 일반 웹캠을 mjpg-streamer로 송출 (8090) ----
+    try:
+        webcam_proc = start_mjpg_streamer(
+            device="/dev/video4",
+            width=640,
+            height=480,
+            fps=30,
+            port=8090,
+            yuyv=False,
+        )
+        node.get_logger().info("Webcam via mjpg-streamer: http://<호스트IP>:8090/?action=stream")
+    except Exception as e:
+        webcam_proc = None
+        node.get_logger().warn(f"mjpg-streamer 시작 실패: {e}")
 
     try:
-        while True:
+        while rclpy.ok():
             color_frame, depth_frame = rsys.get_frames()
             if not depth_frame or not color_frame:
                 continue
@@ -152,6 +238,8 @@ def main():
             result = rsys.yolo.predict(source=color_bgr, verbose=False, conf=0.7)[0]
             vis = color_bgr.copy()
 
+            detected_names = []
+
             if result.boxes is not None and len(result.boxes) > 0:
                 xyxy = result.boxes.xyxy.cpu().numpy()
                 cls = result.boxes.cls.cpu().numpy()
@@ -164,33 +252,47 @@ def main():
                     if not np.isfinite(z) or z <= 0:
                         continue
                     XYZ_common = rsys.cam_to_common(XYZ_cam)
-                    name = rsys.yolo.names[int(cls_id)] if hasattr(rsys.yolo, "names") else str(int(cls_id))
+                    name = (rsys.yolo.names[int(cls_id)]
+                            if hasattr(rsys.yolo, "names") else str(int(cls_id)))
+                    detected_names.append(name)
+
                     x, y, zc = XYZ_common
                     cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     cv2.circle(vis, (u, v), 3, (0, 0, 255), -1)
                     cv2.putText(vis, f"{name} {c:.2f} x={x:.3f} y={y:.3f} z={zc:.3f}",
                                 (x1, max(0, y1-7)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 2)
 
+            if detected_names:
+                unique_sorted = sorted(set(detected_names))
+                msg = ",".join(unique_sorted)
+            else:
+                msg = "none"
+            pub_names.publish(String(data=msg))
+
             depth_vis = np.asanyarray(rsys.colorizer.colorize(depth_frame).get_data())
             stack = np.hstack([vis, depth_vis])
 
-            # JPEG 인코딩 → 전역 최신 프레임 업데이트
             ok, enc = cv2.imencode(".jpg", stack, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if ok:
                 with JPEG_LOCK:
                     global LATEST_JPEG
                     LATEST_JPEG = enc.tobytes()
 
-            # 로컬 미리보기 필요 시:
-            # cv2.imshow("preview", stack)
-            # if (cv2.waitKey(1) & 0xFF) in (ord('q'), 27): break
+            # 필요하면 FPS 제어
+            # time.sleep(1.0/rsys.FPS)
 
     except KeyboardInterrupt:
         pass
     finally:
-        httpd.shutdown()
+        stop_mjpg_streamer(webcam_proc)
+        try:
+            httpd.shutdown()
+        except Exception:
+            pass
         rsys.stop()
         cv2.destroyAllWindows()
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == "__main__":
     main()

@@ -12,6 +12,8 @@ from dynamixel_sdk import PortHandler, PacketHandler, GroupSyncWrite
 from arm_interfaces.srv import ArmDoTask
 from arm_interfaces.msg import DetectedObject
 
+from .missions_robotarm import get_mission_handler, get_available_missions
+
 d1 = 0
 a2, a3, a4 = 0.18525, 0.18525, 0.256
 
@@ -27,12 +29,10 @@ class ArmController(Node):
         self.detected_sub = self.create_subscription(
             DetectedObject, 'detected_objects', self.handle_detected_object, 10
         )
-        self.auto_task_map = {
-            'box': 'pick',
-            'button': 'press_button',
-            'handle': 'open_handle',
-            # 필요에 따라 추가
-        }
+
+        # 미션 시스템 초기화
+        self.available_missions = get_available_missions()
+        self.get_logger().info(f"Available missions: {self.available_missions}")
         
         self.DEVICENAME = '/dev/ttyROBOTARM'
         self.BAUDRATE = 1000000
@@ -104,7 +104,7 @@ class ArmController(Node):
 
         # 기구/맵핑
         self.gear = [1.0, 5.0, 5.0, 5.0]
-        self.dir = [1, -1, 1, 1]
+        self.dir = [1, 1, 1, 1]
         self.zero = [0]
         for dxl_id in self.ids_x:
             pos, result, error = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
@@ -148,7 +148,7 @@ class ArmController(Node):
         # self.go_home()
 
         # 카메라-엔드이펙터 변환 매트릭스 (수정 가능)
-        self.camera_offset = np.array([0.0, 0.0, 0.05])  # 카메라가 엔드이펙터에서 +Z 방향으로 5cm
+        self.camera_offset = np.array([-0.084, 0.0, 0.04155])  # 카메라가 엔드이펙터에서 +Z 방향으로 5cm
         self.camera_rotation = np.eye(3)  # 회전 없음 (필요시 수정)
 
     # 유틸
@@ -198,14 +198,51 @@ class ArmController(Node):
         motor = (ticks - zero) / RAD2TICKS
         return (motor / self.gear[joint_idx]) * self.dir[joint_idx]
 
+    def write_goal_and_wait(self, dxl_id:int, tick:int, tol:int=8, timeout:float=2.0):
+        self.packet_x.write4ByteTxRx(self.port, dxl_id, self.ADDR_GOAL_POSITION, int(tick))
+        t0 = time.time()
+        while time.time()-t0 < timeout:
+            pos, res, err = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
+            if res==0 and err==0 and abs(int(pos)-tick) <= tol:
+                return True
+            time.sleep(0.01)
+        return False
+
     def init_last_q_from_present(self):
         q = [0.0]*4
         ax_pos,_,_ = self.packet_ax.read2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_PRESENT_POS)
+
+        # 홈 틱을 무조건 512로 지정
+        self.base_home_tick = 512
+        self.base_goal = 512
+        self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id,
+                                    self.AX_ADDR_GOAL_POSITION,
+                                    self.base_home_tick)
+
+        self.xl_home_ticks = []
         q[0] = self.ticks_to_joint_rad(0, ax_pos)
+
+        # Joint 2, 3번 모터를 먼저 2048로 이동
         for j, dxl_id in enumerate(self.ids_x, start=1):  # j=1..3 → J2..J4
-            pos, res, err = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
-            if res==0 and err==0:
-                q[j] = self.ticks_to_joint_rad(j, int(pos))
+            if j == 1 or j == 2:  # Joint 2, 3번 (ids_x[0], ids_x[1])
+                # 포지션 모드에서 2048로 이동
+                self.packet_x.write4ByteTxRx(self.port, dxl_id, self.ADDR_GOAL_POSITION, 2048)
+                self.get_logger().info(f"Moving joint {j+1} (ID {dxl_id}) to position 2048")
+
+                # 이동 완료까지 대기
+                self.write_goal_and_wait(dxl_id, 2048, tol=10, timeout=5.0)
+
+                # 2048을 홈 틱으로 저장
+                self.xl_home_ticks.append(2048)
+                q[j] = self.ticks_to_joint_rad(j, 2048)
+            else:  # Joint 4번은 현재 위치 유지
+                pos, res, err = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
+                if res==0 and err==0:
+                    self.xl_home_ticks.append(int(pos))       # 홈 틱 저장
+                    q[j] = self.ticks_to_joint_rad(j, int(pos))
+                else:
+                    self.xl_home_ticks.append(0)
+
         self.last_q = np.zeros(len(self.chain.links))
         self.last_q[1:5] = q
         self.get_logger().info(f"Init last_q(deg)={np.rad2deg(self.last_q[1:5])}")
@@ -262,7 +299,7 @@ class ArmController(Node):
         for init_q in initial_positions:
             try:
                 ik = self.chain.inverse_kinematics(
-                    target_position=[-x, y, z],
+                    target_position=[x, y, z],
                     orientation_mode=None,
                     initial_position=init_q,
                 )
@@ -373,12 +410,17 @@ class ArmController(Node):
 
         ok = False
         if task == 'press_button': ok = self.press_button_seq(base_coord)
-        elif task == 'open_handle': ok = self. turn_handle_seq(base_coord)
+        elif task == 'open_handle': ok = self.turn_handle_seq(base_coord)
         elif task == 'pick': ok = self.pick_seq(base_coord)
         elif task == 'place': ok = self.place_seq(base_coord)
         elif task == 'move_to_coord': ok = self.move_ik(*base_coord)
         else:
-            response.success = False; response.message = f'Unknown task {task}'; return response
+            # 미션 시스템으로 시도
+            mission_handler = get_mission_handler(task, self)
+            if mission_handler:
+                ok = mission_handler.execute(x, y, z)
+            else:
+                response.success = False; response.message = f'Unknown task {task}'; return response
         response.success = bool(ok)
         response.message = 'done' if ok else 'failed'
         return response
@@ -387,27 +429,32 @@ class ArmController(Node):
         """감지된 물체에 대해 자동으로 동작 수행"""
         object_name = msg.object_name.lower()
 
-        if object_name not in self.auto_task_map:
-            self.get_logger().info(f"Unknown object detected: {object_name}")
+        self.get_logger().info(f"Object detected: {object_name} at ({msg.x}, {msg.y}, {msg.z})")
+
+        # 미션 핸들러 가져오기
+        mission_handler = get_mission_handler(object_name, self)
+
+        if not mission_handler:
+            self.get_logger().warn(f"Unknown object/mission: {object_name}")
+            self.get_logger().info(f"Available missions: {self.available_missions}")
             return
 
-        task = self.auto_task_map[object_name]
-        camera_coord = np.array([msg.x, msg.y, msg.z], dtype=float)
+        # 미션 실행
+        try:
+            success = mission_handler.execute(msg.x, msg.y, msg.z)
+            result = "SUCCESS" if success else "FAILED"
+            self.get_logger().info(f"Mission {object_name}: {result}")
+        except Exception as e:
+            self.get_logger().error(f"Mission {object_name} failed with exception: {e}")
 
-        self.get_logger().info(f"Auto-executing {task} for {object_name} at {camera_coord}")
+    def execute_mission_by_name(self, mission_name, x, y, z):
+        """미션 이름으로 직접 미션 실행 (테스트/디버깅용)"""
+        mission_handler = get_mission_handler(mission_name, self)
+        if not mission_handler:
+            self.get_logger().error(f"Mission not found: {mission_name}")
+            return False
 
-        # 카메라 좌표를 베이스 좌표로 변환
-        base_coord = self.camera_to_base(camera_coord)
-
-        # 해당 시퀀스 실행
-        ok = False
-        if task == 'press_button': ok = self.press_button_seq(base_coord)
-        elif task == 'open_handle': ok = self.turn_handle_seq(base_coord)
-        elif task == 'pick': ok = self.pick_seq(base_coord)
-        elif task == 'place': ok = self.place_seq(base_coord)
-
-        result = "SUCCESS" if ok else "FAILED"
-        self.get_logger().info(f"Auto task {task} for {object_name}: {result}")
+        return mission_handler.execute(x, y, z)
 
 
 def main():

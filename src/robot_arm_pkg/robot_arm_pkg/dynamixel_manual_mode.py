@@ -110,23 +110,7 @@ class ArmController(Node):
 
         # 팔 X-series 초기 설정
         for dxl_id in self.ids_x:
-            # # 초기 위치 정밀 세팅을 위한 포지션 모드 3번
-            # self.packet_x.write1ByteTxRx(self.port, dxl_id, self.ADDR_OPERATING_MODE, 3)
-            # # 틱값 2800으로 이동
-            # self.packet_x.write4ByteTxRx(self.port, dxl_id, self.ADDR_GOAL_POSITION, 2800)
-            # time.sleep(0.5)  # 잠시 대기
-            # # 위치 도달 대기
-            # self.write_goal_and_wait(dxl_id, 2800, tol=16, timeout=3.0)
-            # # 토크 끄고
-            # self.packet_x.write1ByteTxRx(self.port, dxl_id, self.ADDR_TORQUE_ENABLE, self.TORQUE_DISABLE)
-            # time.sleep(0.1)
-            # # 역 ㄷ자에 맞게 홈 오프셋 설정 (엔코더 0점 보정)
-            # self.packet_x.write4ByteTxRx(self.port, dxl_id, 20, 2800)
-            # time.sleep(0.1)
-            # # 다시 토크 온
-            # self.packet_x.write1ByteTxRx(self.port, dxl_id, self.ADDR_TORQUE_ENABLE, self.TORQUE_ENABLE)
-            # time.sleep(0.1)
-            # # 이제부터는 Extended 포지션 모드 4번
+            
             # Extended 포지션 모드 4번
             self.packet_x.write1ByteTxRx(self.port, dxl_id, self.ADDR_OPERATING_MODE, 4)
             # current limit
@@ -151,7 +135,7 @@ class ArmController(Node):
 
         # 기구/맵핑
         self.gear = [1.0, 5.0, 5.0, 5.0]
-        self.dir = [1, -1, 1, 1]
+        self.dir = [1, 1, 1, 1]
         self.zero = [0]
         for dxl_id in self.ids_x:
             pos, result, error = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
@@ -168,7 +152,7 @@ class ArmController(Node):
             DHLink(d=d1, a=0, alpha=np.deg2rad(-90), theta=0),
             DHLink(d=0, a=a2, alpha=0, theta=np.deg2rad(0)),
             DHLink(d=0, a=a3, alpha=0, theta=np.deg2rad(-90)),
-            DHLink(d=0, a=a4, alpha=0, theta=np.deg2rad(-90)),
+            DHLink(d=0, a=a4, alpha=np.deg2rad(-90), theta=np.deg2rad(-90)),
         ]
         )
         self.z_offset = 0.0
@@ -264,30 +248,55 @@ class ArmController(Node):
 
         self.xl_home_ticks = []
         q[0] = self.ticks_to_joint_rad(0, ax_pos)
+
+        # Joint 2, 3번 모터를 먼저 2048로 이동
         for j, dxl_id in enumerate(self.ids_x, start=1):  # j=1..3 → J2..J4
-            pos, res, err = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
-            if res==0 and err==0:
-                self.xl_home_ticks.append(int(pos))       # 홈 틱 저장
-                q[j] = self.ticks_to_joint_rad(j, int(pos))
-            else:
-                self.xl_home_ticks.append(0)
+            if j == 1 or j == 2:  # Joint 2, 3번 (ids_x[0], ids_x[1])
+                # 포지션 모드에서 2048로 이동
+                self.packet_x.write4ByteTxRx(self.port, dxl_id, self.ADDR_GOAL_POSITION, 2048)
+                self.get_logger().info(f"Moving joint {j+1} (ID {dxl_id}) to position 2048")
+
+                # 이동 완료까지 대기
+                self.write_goal_and_wait(dxl_id, 2048, tol=10, timeout=5.0)
+
+                # 2048을 홈 틱으로 저장
+                self.xl_home_ticks.append(2048)
+                q[j] = self.ticks_to_joint_rad(j, 2048)
+            else:  # Joint 4번은 현재 위치 유지
+                pos, res, err = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
+                if res==0 and err==0:
+                    self.xl_home_ticks.append(int(pos))       # 홈 틱 저장
+                    q[j] = self.ticks_to_joint_rad(j, int(pos))
+                else:
+                    self.xl_home_ticks.append(0)
 
         self.last_q = np.zeros(len(self.chain.links))
         self.last_q[1:5] = q
         self.get_logger().info(f"Init last_q(deg)={np.rad2deg(self.last_q[1:5])}")
 
     def move_ik(self, x, y, z):
+        # 작업공간 리미트 체크
+        dist = np.linalg.norm([x, y, z])
+        if dist > 0.8:  # 80cm 제한
+            self.get_logger().warn(f"Target too far: {dist:.3f}m > 0.8m")
+            return
+        if z < -0.3:  # 지면 아래 30cm 제한
+            self.get_logger().warn(f"Target too low: z={z:.3f}m < -0.3m")
+            return
+
         ik = self.chain.inverse_kinematics(
-            target_position=[-x, y, z],
+            target_position=[x, y, z],
             orientation_mode=None,
             initial_position=self.last_q,
         )
         q = list(ik[1:5])
 
+        # 조인트 리미트 강화
         for i in range(4):
             lo, hi = self.limits[i]
-            if q[i] < lo: q[i] = lo
-            if q[i] > hi: q[i] = hi
+            if q[i] < lo or q[i] > hi:
+                self.get_logger().warn(f"Joint {i+1} limit violation: {np.rad2deg(q[i]):.1f}° (limit: {np.rad2deg(lo):.1f}° ~ {np.rad2deg(hi):.1f}°)")
+                return
 
         if not self.send_ax_base_deg(np.rad2deg(q[0]) * self.dir[0]):
             self.get_logger().warn("IK move blocked due to base limit violation")
@@ -392,6 +401,9 @@ class ArmController(Node):
         # 초기자세
         if   c == 'home':
             self.go_home_ticks()
+            # manual_offset도 완전 초기화
+            self.manual_offset[:] = 0.0
+            self.get_logger().info("Home: manual_offset reset to zero")
             return
         
         # 나뭇가지 치우기용
@@ -407,7 +419,7 @@ class ArmController(Node):
             self.go_home_ticks()
             return
 
-        # 왼/오 → AX 베이스 틱 증분
+        # 왼/오 → AX 베이스 틱 증분 (단순 회전, IK 동기화 제거)
         if c in ('left','l','right','r'):
             delta_deg = self.base_step_deg if c in ('left','l') else -self.base_step_deg
             dtick = int(round(delta_deg * AX_TICKS_PER_DEG))
@@ -424,13 +436,6 @@ class ArmController(Node):
             self.base_goal = max(0, min(1023, new_goal))
             self.get_logger().info(f"Base {c}: {old_goal} -> {self.base_goal} (step={dtick})")
             self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, int(self.base_goal))
-            # IK 초기값 동기 - 베이스만이 아니라 모든 조인트 현재 위치 읽어서 동기화
-            self.last_q[1] = self.ticks_to_joint_rad(0, self.base_goal)
-            # 다른 조인트들도 현재 위치 읽어서 동기화
-            for j, dxl_id in enumerate(self.ids_x, start=2):  # J2, J3, J4
-                pos, res, err = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
-                if res == 0 and err == 0:
-                    self.last_q[j] = self.ticks_to_joint_rad(j-1, int(pos))
             return
 
         # 앞/뒤/위/아래 → 홈 기준 누적 후 IK

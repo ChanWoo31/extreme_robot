@@ -97,7 +97,7 @@ class ArmController(Node):
 
         # 기구/맵핑
         self.gear = [1.0, 5.0, 5.0, 5.0]
-        self.dir = [1, -1, 1, 1]
+        self.dir = [1, 1, 1, 1]
         self.zero = [0]
         for dxl_id in self.ids_x:
             pos, result, error = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)

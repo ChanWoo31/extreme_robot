@@ -1,17 +1,11 @@
-#groupsync version -> 매뉴얼
+#groupsync version -> 매뉴얼 (기구학 제거)
 import numpy as np
 import time
-from ikpy.link import OriginLink, DHLink
-from ikpy.chain import Chain
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Point
 from std_msgs.msg import String
 from dynamixel_sdk import PortHandler, PacketHandler, GroupSyncWrite
-
-d1 = 0
-a2, a3, a4 = 0.18525, 0.18525, 0.256
 
 RAD2TICKS = 4096 / (2*np.pi)
 AX_TICKS_PER_DEG = 1023.0 / 300.0
@@ -63,14 +57,6 @@ class ArmController(Node):
         self.grip_open_tick  = self.declare_parameter('grip_open_tick', 480).get_parameter_value().integer_value
         self.grip_close_tick = self.declare_parameter('grip_close_tick', 330).get_parameter_value().integer_value
         self.grip_close_fully_tick = self.declare_parameter('grip_close_fully_tick', 0).get_parameter_value().integer_value
-
-        # --- arm manual ---
-        self.home_x = self.declare_parameter('home_x', 0.07075).get_parameter_value().double_value
-        self.home_y = self.declare_parameter('home_y', 0.0).get_parameter_value().double_value
-        self.home_z = self.declare_parameter('home_z', 0.18525).get_parameter_value().double_value
-        self.cart_step = self.declare_parameter('cart_step_m', 0.1).get_parameter_value().double_value  # 10 cm
-        self.home = np.array([self.home_x, self.home_y, self.home_z], dtype=float)
-        self.manual_offset = np.zeros(3, dtype=float)
 
         self.base_step_deg = self.declare_parameter('base_step_deg', 5.0).get_parameter_value().double_value
 
@@ -127,48 +113,21 @@ class ArmController(Node):
         )
         self.sync_speed = GroupSyncWrite(self.port, self.packet_x, self.ADDR_PROFILE_VELOCITY, 4)
 
-
         self.get_logger().info('ArmController initialized')
 
-        # 기구/맵핑
+        # 기구/맵핑 (틱값 직접 제어용)
         self.gear = [1.0, 5.0, 5.0, 5.0]
         self.dir = [1, 1, 1, 1]
-        self.zero = [0]
-        for dxl_id in self.ids_x:
-            pos, result, error = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
-            if result == 0 and error == 0:
-                self.zero.append(pos)
-                self.get_logger().info(f"ID {dxl_id} initial pos (zero offset)")
-            else:
-                self.zero.append(0)
-                self.get_logger().error(f"Failed") 
 
-        # 역 ㄷ자 시작
-        self.chain = Chain(name='arm4', links=[
-            OriginLink(),
-            DHLink(d=d1, a=0, alpha=np.deg2rad(-90), theta=0),
-            DHLink(d=0, a=a2, alpha=0, theta=np.deg2rad(0)),
-            DHLink(d=0, a=a3, alpha=0, theta=np.deg2rad(-90)),
-            DHLink(d=0, a=a4, alpha=np.deg2rad(-90), theta=np.deg2rad(-90)),
-        ]
-        )
-        self.z_offset = 0.0
-        # 리미트!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        # 조인트 리미트 (라디안)
         self.limits=[(-np.deg2rad(150), np.deg2rad(150)),
-                     (-np.deg2rad(170), np.deg2rad(0)),
+                     (-np.deg2rad(170), np.deg2rad(5)),
                      (-np.deg2rad(5), np.deg2rad(90)),
                      (-np.deg2rad(5), np.deg2rad(100))]
-        
-        #잘 되는지 테스트 필요
-        # self.last_q = np.zeros(len(self.chain.links))
-        self.violation_latched = False
-        self.block_until = 0.0
-        self.block_sec = 1.0
-        
-        self.init_last_q_from_present()
-        # self.go_home()
-        
 
+        # 홈 위치로 이동한 후 zero 설정
+        self.init_home_positions()
+        
     def int32_to_le(self, v:int):
         v &= 0xFFFFFFFF
         return bytes([v & 0xFF, (v>>8)&0xFF, (v>>16)&0xFF, (v>>24)&0xFF])
@@ -204,38 +163,32 @@ class ArmController(Node):
         self.packet_ax.write2ByteTxRx(self.port, self.ax_grip_id, self.AX_ADDR_GOAL_POSITION, tgt)
 
     def stop_hold(self):
+        # 현재 위치에서 정지
         pos_ax,_,_ = self.packet_ax.read2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_PRESENT_POS)
-        # 현재 위치 리미트 체크
-        curr_rad = self.ticks_to_joint_rad(0, pos_ax)
-        lo, hi = self.limits[0]
-        if curr_rad < lo or curr_rad > hi:
-            self.get_logger().warn(f"Current base position {np.rad2deg(curr_rad):.1f}° violates limits, holding at safe position")
-            # 안전한 위치로 이동 (0도)
-            self.send_ax_base_deg(0.0)
-        else:
-            self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, pos_ax)
-        self.send_x_positions(*[ (self.last_q[i+1]) for i in range(3)])
+        self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, pos_ax)
 
     def go_home(self):
-        q = [0.0, 0.0, 0.0, 0.0]
-        if not self.send_ax_base_deg(np.rad2deg(q[0]) * self.dir[0]):
-            self.get_logger().warn("Home position blocked due to base limit violation")
-            return
-        self.send_x_positions(q[1], q[2] ,q[3])
-        tmp = np.zeros(len(self.chain.links)); tmp[1:5] = q; self.last_q = tmp
+        # 홈 위치로 이동
+        self.go_home_ticks()
 
     def ticks_to_joint_rad(self, joint_idx, ticks):
         if joint_idx == 0:  # AX-12A J1
             deg = (ticks - 512) * (300.0/1023.0)
             return np.deg2rad(deg) * self.dir[0]
-        zero = self.zero[joint_idx]                  # zero[1]→ID2, zero[2]→ID3, zero[3]→ID4
-        motor = (ticks - zero) / RAD2TICKS
-        return (motor / self.gear[joint_idx]) * self.dir[joint_idx]
 
-    def init_last_q_from_present(self):
-        q = [0.0]*4
-        ax_pos,_,_ = self.packet_ax.read2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_PRESENT_POS)
+        # joint_idx를 배열 인덱스로 변환 (J1→0, J2→1, J3→2, J4→3)
+        if joint_idx == 1:  # J1은 베이스라서 위에서 처리됨
+            return 0.0
+        elif joint_idx in [2, 3, 4]:  # J2, J3, J4
+            zero_idx = joint_idx - 1  # J2→1, J3→2, J4→3
+            gear_idx = joint_idx - 1  # J2→1, J3→2, J4→3
+            zero = self.zero[zero_idx]
+            motor = (ticks - zero) / RAD2TICKS
+            return (motor / self.gear[gear_idx]) * self.dir[gear_idx]
+        else:
+            return 0.0
 
+    def init_home_positions(self):
         # 홈 틱을 무조건 512로 지정
         self.base_home_tick = 512
         self.base_goal = 512
@@ -244,7 +197,6 @@ class ArmController(Node):
                                     self.base_home_tick)
 
         self.xl_home_ticks = []
-        q[0] = self.ticks_to_joint_rad(0, ax_pos)
 
         # Joint 2, 3번 모터를 먼저 2048로 이동
         for j, dxl_id in enumerate(self.ids_x, start=1):  # j=1..3 → J2..J4
@@ -258,56 +210,26 @@ class ArmController(Node):
 
                 # 2048을 홈 틱으로 저장
                 self.xl_home_ticks.append(2048)
-                q[j] = self.ticks_to_joint_rad(j, 2048)
             else:  # Joint 4번은 현재 위치 유지
                 pos, res, err = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
                 if res==0 and err==0:
                     self.xl_home_ticks.append(int(pos))       # 홈 틱 저장
-                    q[j] = self.ticks_to_joint_rad(j, int(pos))
                 else:
                     self.xl_home_ticks.append(0)
 
-        self.last_q = np.zeros(len(self.chain.links))
-        self.last_q[1:5] = q
-        self.get_logger().info(f"Init last_q(deg)={np.rad2deg(self.last_q[1:5])}")
+        # 홈 위치 이동 후 zero offset 설정
+        self.zero = [0]
+        for dxl_id in self.ids_x:
+            pos, result, error = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
+            if result == 0 and error == 0:
+                self.zero.append(pos)
+                self.get_logger().info(f"ID {dxl_id} zero offset set to {pos}")
+            else:
+                self.zero.append(0)
+                self.get_logger().error(f"Failed to read position for ID {dxl_id}")
 
-    def move_ik(self, x, y, z):
-        # 작업공간 리미트 체크
-        dist = np.linalg.norm([x, y, z])
-        if dist > 0.8:  # 80cm 제한
-            self.get_logger().warn(f"Target too far: {dist:.3f}m > 0.8m")
-            return
-        if z < -0.3:  # 지면 아래 30cm 제한
-            self.get_logger().warn(f"Target too low: z={z:.3f}m < -0.3m")
-            return
+        self.get_logger().info("Home positions initialized")
 
-        ik = self.chain.inverse_kinematics(
-            target_position=[-x, y, z],
-            orientation_mode=None,
-            initial_position=self.last_q,
-        )
-        q = list(ik[1:5])
-
-        # 조인트 리미트 강화
-        for i in range(4):
-            lo, hi = self.limits[i]
-            if q[i] < lo or q[i] > hi:
-                self.get_logger().warn(f"Joint {i+1} limit violation: {np.rad2deg(q[i]):.1f}° (limit: {np.rad2deg(lo):.1f}° ~ {np.rad2deg(hi):.1f}°)")
-                return
-
-        if not self.send_ax_base_deg(np.rad2deg(q[0]) * self.dir[0]):
-            self.get_logger().warn("IK move blocked due to base limit violation")
-            return
-        self.send_x_positions(q[1], q[2] ,q[3])
-        tmp = self.last_q.copy(); tmp[1:5] = q; self.last_q = tmp
-
-        fk = self.chain.forward_kinematics(np.r_[0.0, q])  # 0+J1..J4
-        reach = fk[:3, 3]
-        err = np.linalg.norm(reach - np.array([x, y, z]))
-        self.get_logger().info(f"FK reach=({reach[0]:.5f},{reach[1]:.5f},{reach[2]:.5f}), err={err*1000:.3f} mm")
-
-        # manual_offset을 실제 도달한 위치로 업데이트
-        self.manual_offset[:] = np.array([x, y, z]) - self.home
 
     def go_home_ticks(self):
         # 베이스 AX 복귀
@@ -321,39 +243,21 @@ class ArmController(Node):
             self.sync_write.addParam(dxl_id, self.int32_to_le(int(t)))
         self.sync_write.txPacket()
 
-        # IK 내부 상태 동기
-        q0 = self.ticks_to_joint_rad(0, self.base_home_tick)
-        q1 = self.ticks_to_joint_rad(1, self.xl_home_ticks[0])
-        q2 = self.ticks_to_joint_rad(2, self.xl_home_ticks[1])
-        q3 = self.ticks_to_joint_rad(3, self.xl_home_ticks[2])
-        self.last_q[1:5] = [q0, q1, q2, q3]
-
-        # manual_offset도 초기화
-        self.manual_offset[:] = 0.0
-        self.get_logger().info(f"Home: manual_offset reset to {self.manual_offset}")
-
-    def goto_xyz(self, x, y, z):
-        """임의 좌표로 점프 + 이후 조그는 이 지점에서 계속 누적"""
-        # 1) IK로 이동
-        self.move_ik(x, y, z)
-        # 2) 누적 기준을 이 점에 맞추기
-        self.manual_offset[:] = np.array([x, y, z]) - self.home
+        self.get_logger().info("Returned to home position")
 
     def base_rotate_deg(self, delta_deg: float, wait_s: float = 0.0):
         dtick = int(round(delta_deg * AX_TICKS_PER_DEG))
         new_goal = self.base_goal + dtick
 
-        # 각도 리미트 확인
-        new_rad = self.ticks_to_joint_rad(0, new_goal)
-        lo, hi = self.limits[0]
-        if new_rad < lo or new_rad > hi:
-            self.get_logger().warn(f"Base rotation blocked by limit: {np.rad2deg(new_rad):.1f}° (limit: {np.rad2deg(lo):.1f}° ~ {np.rad2deg(hi):.1f}°)")
-            return
+        # 베이스 리미트 체크 비활성화
+        # new_rad = self.ticks_to_joint_rad(0, new_goal)
+        # lo, hi = self.limits[0]  # J1은 인덱스 0
+        # if new_rad < lo or new_rad > hi:
+        #     self.get_logger().warn(f"Base rotation blocked by limit: {np.rad2deg(new_rad):.1f}° (limit: {np.rad2deg(lo):.1f}° ~ {np.rad2deg(hi):.1f}°)")
+        #     return
 
         self.base_goal = max(0, min(1023, new_goal))
         self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, int(self.base_goal))
-        # IK 초기값 동기 (J1 라디안 재계산)
-        self.last_q[1] = self.ticks_to_joint_rad(0, self.base_goal)
         if wait_s > 0:
             time.sleep(wait_s)
 
@@ -378,8 +282,46 @@ class ArmController(Node):
         # 목표 틱 쓰기
         self.packet_x.write4ByteTxRx(self.port, dxl_id, self.ADDR_GOAL_POSITION, int(new_tick))
 
-        # 내부 상태 업데이트(다음 IK/조깅 일관성)
-        self.last_q[2] = q2_new
+    def nudge_joint_deg(self, joint_num: int, delta_deg: float):
+        """조인트 직접 제어 (1=베이스, 2-4=XL 모터)"""
+        if joint_num == 1:  # 베이스 AX-12A
+            self.base_rotate_deg(delta_deg)
+        elif joint_num in [2, 3, 4]:  # XL 모터들
+            dxl_id = self.ids_x[joint_num - 2]  # J2=ids_x[0], J3=ids_x[1], J4=ids_x[2]
+
+            # 현재 틱 읽기
+            curr, res, err = self.packet_x.read4ByteTxRx(self.port, dxl_id, self.ADDR_PRESENT_POSITION)
+            if res != 0 or err != 0:
+                self.get_logger().warn(f'Joint {joint_num} read fail'); return
+
+            # unsigned를 signed 32bit로 변환
+            if curr > 2_147_483_647:
+                curr = curr - 4_294_967_296
+
+            # 조인트 각도(deg) → 모터 틱 델타로 변환
+            delta_rad = np.deg2rad(delta_deg)
+            # joint_num은 1,2,3,4이지만 배열 인덱스는 0,1,2,3이므로 -1
+            gear_idx = joint_num - 1  # J1→0, J2→1, J3→2, J4→3
+            delta_tick = int(round(delta_rad * self.dir[gear_idx] * self.gear[gear_idx] * RAD2TICKS))
+
+            new_tick = curr + delta_tick
+            # Extended Position 모드 범위로 클램핑
+            new_tick = max(-2_147_483_648, min(2_147_483_647, new_tick))
+
+            # 조인트 리미트 체크
+            q_new = self.ticks_to_joint_rad(joint_num, new_tick)
+            limit_idx = joint_num - 1  # 배열 인덱스 맞춤
+            lo, hi = self.limits[limit_idx]
+
+            # 디버그 정보
+            self.get_logger().info(f"Joint {joint_num}: curr={curr}, delta_tick={delta_tick}, new_tick={new_tick}, q_new={np.rad2deg(q_new):.1f}°")
+
+            if q_new < lo or q_new > hi:
+                self.get_logger().warn(f"Joint {joint_num} limit blocked: {np.rad2deg(q_new):.1f}° (limit: {np.rad2deg(lo):.1f}° ~ {np.rad2deg(hi):.1f}°)")
+                return
+
+            # 목표 틱 쓰기
+            self.packet_x.write4ByteTxRx(self.port, dxl_id, self.ADDR_GOAL_POSITION, int(new_tick))
 
     def write_goal_and_wait(self, dxl_id:int, tick:int, tol:int=8, timeout:float=2.0):
         self.packet_x.write4ByteTxRx(self.port, dxl_id, self.ADDR_GOAL_POSITION, int(tick))
@@ -393,23 +335,16 @@ class ArmController(Node):
 
     def on_manual_command(self, msg: String):
         c = msg.data.strip().lower()
-        s = self.cart_step
 
         # 초기자세
         if   c == 'home':
             self.go_home_ticks()
-            # manual_offset도 완전 초기화
-            self.manual_offset[:] = 0.0
-            self.get_logger().info("Home: manual_offset reset to zero")
             return
         
         # 나뭇가지 치우기용
         if c == 'branch_clear':
-            self.goto_xyz(0.55, 0.0, -0.2)
-            time.sleep(8.0)
+            # 특정 틱값으로 이동하는 시퀀스
             self.base_rotate_deg(30, wait_s=2.5)
-            # self.base_rotate_deg(-30, wait_s=2.5)
-            # self.goto_xyz(0.55, 0.0, 0.0)
             time.sleep(2.0)
             self.nudge_joint2_deg(10)
             time.sleep(4.0)
@@ -435,17 +370,6 @@ class ArmController(Node):
             self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, int(self.base_goal))
             return
 
-        # 앞/뒤/위/아래 → 홈 기준 누적 후 IK
-        if   c in ('front','f'): self.manual_offset[0] += s
-        elif c in ('back','b'):  self.manual_offset[0] -= s
-        elif c in ('up','u'):    self.manual_offset[2] += s
-        elif c in ('down','d'):  self.manual_offset[2] -= s
-        elif c.startswith('step '):
-            try:
-                self.cart_step = float(c.split()[1]); self.get_logger().info(f'step={self.cart_step} m')
-            except Exception:
-                self.get_logger().warn('usage: step <meters>')
-            return
 
         # Back lift commands
         elif c == 'blift_up':
@@ -493,26 +417,39 @@ class ArmController(Node):
             self.packet_x.write4ByteTxRx(self.port, self.x_lift_id, self.ADDR_GOAL_POSITION, int(tgt))
             return
 
+        # 개별 조인트 틱값 직접 제어
+        elif c == 'j1_plus':
+            self.nudge_joint_deg(1, self.base_step_deg)
+            return
+        elif c == 'j1_minus':
+            self.nudge_joint_deg(1, -self.base_step_deg)
+            return
+        elif c == 'j2_plus':
+            self.nudge_joint_deg(2, 5.0)
+            return
+        elif c == 'j2_minus':
+            self.nudge_joint_deg(2, -5.0)
+            return
+        elif c == 'j3_plus':
+            self.nudge_joint_deg(3, 5.0)
+            return
+        elif c == 'j3_minus':
+            self.nudge_joint_deg(3, -5.0)
+            return
+        elif c == 'j4_plus':
+            self.nudge_joint_deg(4, 5.0)
+            return
+        elif c == 'j4_minus':
+            self.nudge_joint_deg(4, -5.0)
+            return
+
         # Arduino commands (pass through, no action needed here)
         elif c in ('go', 'stop'):
             return
 
-        # Movement commands (앞/뒤/위/아래)
-        elif c in ('front','f'):
-            self.manual_offset[0] += s
-        elif c in ('back','b'):
-            self.manual_offset[0] -= s
-        elif c in ('up','u'):
-            self.manual_offset[2] += s
-        elif c in ('down','d'):
-            self.manual_offset[2] -= s
         else:
-            self.get_logger().warn(f'unknown cmd: {c}')
+            # 유효하지 않은 명령어는 조용히 무시
             return
-
-        # IK 이동 (movement commands의 경우에만 실행)
-        tgt = self.home + self.manual_offset
-        self.move_ik(tgt[0], tgt[1], tgt[2])
 
 
 

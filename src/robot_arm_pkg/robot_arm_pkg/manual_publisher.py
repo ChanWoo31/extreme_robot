@@ -25,13 +25,15 @@ class KeyTeleop(Node):
         if not ch:
             return True
 
-        # 팔 이동
-        if   ch == 'q': self.send(self.pub_manual, 'front')
-        elif ch == 'e': self.send(self.pub_manual, 'back')
-        elif ch == 'w': self.send(self.pub_manual, 'up')
-        elif ch == 's': self.send(self.pub_manual, 'down')
-        elif ch == 'a': self.send(self.pub_manual, 'left')
-        elif ch == 'd': self.send(self.pub_manual, 'right')
+        # 개별 조인트 제어 (틱값 직접 제어)
+        if   ch == 'q': self.send(self.pub_manual, 'j1_plus')    # J1 +
+        elif ch == 'a': self.send(self.pub_manual, 'j1_minus')   # J1 -
+        elif ch == 'w': self.send(self.pub_manual, 'j2_plus')    # J2 +
+        elif ch == 's': self.send(self.pub_manual, 'j2_minus')   # J2 -
+        elif ch == 'e': self.send(self.pub_manual, 'j3_plus')    # J3 +
+        elif ch == 'd': self.send(self.pub_manual, 'j3_minus')   # J3 -
+        elif ch == 'r': self.send(self.pub_manual, 'j4_plus')    # J4 +
+        elif ch == 'f': self.send(self.pub_manual, 'j4_minus')   # J4 -
         elif ch == 'b': self.send(self.pub_manual, 'branch_clear')
         elif ch == '`': self.send(self.pub_manual, 'home')
 

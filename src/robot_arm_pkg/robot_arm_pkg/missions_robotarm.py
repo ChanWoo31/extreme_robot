@@ -113,7 +113,7 @@ class Mission3BoxGrip(MissionBase):
             self.log_info(f"박스 그립 미션 시작 - 카메라 좌표: {camera_coord}, 베이스 좌표: {base_coord}")
 
             # 박스 그립 시퀀스 실행
-            success = self.arm.pick_seq(base_coord)
+            success = self.arm.move_ik(*base_coord)
 
             if success:
                 self.log_info("박스 그립 미션 성공")
@@ -166,6 +166,7 @@ def get_mission_handler(mission_type, arm_controller):
         'box_grip': Mission3BoxGrip,
         'pick': Mission3BoxGrip,
         'box': Mission3BoxGrip,
+        'ebox': Mission3BoxGrip,  # ebox는 박스 그립 미션으로 처리
 
         'mission_2_button_press': Mission1ButtonPress,
         'button_press': Mission1ButtonPress,

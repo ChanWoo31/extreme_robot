@@ -149,7 +149,7 @@ class ArmController(Node):
 
         # 카메라-엔드이펙터 변환 매트릭스 (수정 가능)
         self.camera_offset = np.array([-0.084, 0.0, 0.04155])  # 카메라가 엔드이펙터에서 +Z 방향으로 5cm
-        self.camera_rotation = np.eye(3)  # 회전 없음 (필요시 수정)
+        self.camera_rotation = np.eye(3)  # 회전 없음 (cam_to_common에서 이미 변환됨)
 
     # 유틸
 
@@ -247,47 +247,6 @@ class ArmController(Node):
         self.last_q[1:5] = q
         self.get_logger().info(f"Init last_q(deg)={np.rad2deg(self.last_q[1:5])}")
 
-    # IK / motion
-
-    # def move_ik(self, x, y, z):
-    #     ik = self.chain.inverse_kinematics(
-    #         target_position=[-x, y, z],
-    #         orientation_mode=None,
-    #         initial_position=self.last_q,
-    #     )
-    #     q = list(ik[1:5])
-
-    #     for i in range(4):
-    #         lo, hi = self.limits[i]
-    #         if q[i] < lo: q[i] = lo
-    #         if q[i] > hi: q[i] = hi
-
-    #     self.send_ax_base_deg(np.rad2deg(q[0]) * self.dir[0])
-    #     self.send_x_positions(q[1], q[2] ,q[3])
-    #     tmp = self.last_q.copy(); tmp[1:5] = q; self.last_q = tmp
-
-    #     fk = self.chain.forward_kinematics(np.r_[0.0, q])  # 0+J1..J4
-    #     reach = fk[:3, 3]
-    #     err = np.linalg.norm(reach - np.array([x, y, z]))
-    #     self.get_logger().info(f"FK reach=({reach[0]:.5f},{reach[1]:.5f},{reach[2]:.5f}), err={err*1000:.3f} mm")
-
-    # def on_point(self, msg: Point):
-    #     now = time.time()
-    #     if now < self.block_until:
-    #         self.get_logger().warn('throttle'); return
-        
-    #     x,y,z = msg.x, msg.y, msg.z
-    #     # if max(abs(x), abs(y), abs(z)) > 5.0:
-    #     #     x,y,z = x*0.001, y*0.001, z*0.001
-    #     self.get_logger().info(f"Target (m): {x:.5f}, {y:.5f}, {z:.5f}")
-
-    #     try:
-    #         self.move_ik(x, y, z + self.z_offset)
-    #     except Exception as e:
-    #         self.get_logger().error(f"IK error: {e}")
-    #         self.stop_hold()
-    #     finally:
-    #         self.block_until = time.time() + self.block_sec
     def solve_ik_q(self, x, y, z):
         # 여러 초기값으로 IK 시도하여 리미트 내 해 찾기
         initial_positions = [

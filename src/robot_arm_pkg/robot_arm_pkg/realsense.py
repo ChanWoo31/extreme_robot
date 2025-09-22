@@ -9,6 +9,7 @@ from ultralytics import YOLO
 # ---- ROS2 (rclpy) ----
 import rclpy
 from std_msgs.msg import String
+from arm_interfaces.msg import DetectedObject
 
 # ---- mjpg-streamer ----
 import subprocess
@@ -200,6 +201,7 @@ def main():
     rclpy.init()
     node = rclpy.create_node('yolo_realsense_mjpeg')
     pub_names = node.create_publisher(String, '/detected_object_names', 10)
+    pub_objects = node.create_publisher(DetectedObject, '/detected_objects', 10)
 
     # ---- RealSense + YOLO (파이썬 내장 MJPEG 서버, 8080) ----
     rsys = RealSense()
@@ -239,6 +241,7 @@ def main():
             vis = color_bgr.copy()
 
             detected_names = []
+            detected_objs = []
 
             if result.boxes is not None and len(result.boxes) > 0:
                 xyxy = result.boxes.xyxy.cpu().numpy()
@@ -256,6 +259,13 @@ def main():
                             if hasattr(rsys.yolo, "names") else str(int(cls_id)))
                     detected_names.append(name)
 
+                    # detected_objs 리스트에 객체 정보 추가
+                    detected_objs.append({
+                        'name': name,
+                        'xyz': XYZ_common,
+                        'confidence': c
+                    })
+
                     x, y, zc = XYZ_common
                     cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     cv2.circle(vis, (u, v), 3, (0, 0, 255), -1)
@@ -265,6 +275,19 @@ def main():
             if detected_names:
                 unique_sorted = sorted(set(detected_names))
                 msg = ",".join(unique_sorted)
+
+                # DetectedObject 메시지도 발행 (첫 번째 검출된 객체)
+                if detected_objs:
+                    first_obj = detected_objs[0]  # 첫 번째 검출 객체
+                    obj_msg = DetectedObject()
+                    obj_msg.object_name = first_obj['name']
+                    obj_msg.x = float(first_obj['xyz'][0])
+                    obj_msg.y = float(first_obj['xyz'][1])
+                    obj_msg.z = float(first_obj['xyz'][2])
+                    obj_msg.confidence = float(first_obj['confidence'])
+                    pub_objects.publish(obj_msg)
+
+                    node.get_logger().info(f"Published DetectedObject: {obj_msg.object_name} at ({obj_msg.x:.3f}, {obj_msg.y:.3f}, {obj_msg.z:.3f})")
             else:
                 msg = "none"
             pub_names.publish(String(data=msg))

@@ -121,7 +121,7 @@ class ArmController(Node):
             DHLink(d=d1, a=0, alpha=np.deg2rad(-90), theta=0),
             DHLink(d=0, a=a2, alpha=0, theta=np.deg2rad(0)),
             DHLink(d=0, a=a3, alpha=0, theta=np.deg2rad(-90)),
-            DHLink(d=0, a=a4, alpha=0, theta=np.deg2rad(-90)),
+            DHLink(d=0, a=a4, alpha=np.deg2rad(-90), theta=np.deg2rad(-90)),
         ]
         )
         self.z_offset = 0.0
@@ -148,7 +148,7 @@ class ArmController(Node):
         # self.go_home()
 
         # 카메라-엔드이펙터 변환 매트릭스 (수정 가능)
-        self.camera_offset = np.array([-0.084, 0.0, 0.04155])  # 카메라가 엔드이펙터에서 +Z 방향으로 5cm
+        self.camera_offset = np.array([-0.084, 0.0, 0.04155])  # 카메라가 엔드이펙터에서 뒤쪽으로 8.4cm
         self.camera_rotation = np.eye(3)  # 회전 없음 (cam_to_common에서 이미 변환됨)
 
     # 유틸
@@ -314,8 +314,14 @@ class ArmController(Node):
         # 카메라 좌표를 엔드이펙터 좌표계로 변환
         camera_in_ee = self.camera_rotation @ camera_xyz + self.camera_offset
 
-        # 엔드이펙터 좌표계를 베이스 좌표계로 변환
+        # 엔드이펙터 좌표계를 베이스 좌표계로 변환 (회전 포함)
         base_xyz = ee_rot @ camera_in_ee + ee_pos
+
+        # 디버깅 로그
+        self.get_logger().info(f"DEBUG: camera_xyz={camera_xyz}")
+        self.get_logger().info(f"DEBUG: camera_in_ee={camera_in_ee}")
+        self.get_logger().info(f"DEBUG: ee_pos={ee_pos}")
+        self.get_logger().info(f"DEBUG: base_xyz={base_xyz}")
 
         return base_xyz
     
@@ -415,6 +421,18 @@ class ArmController(Node):
 
         return mission_handler.execute(x, y, z)
 
+    def test_coordinate_transform(self, camera_x, camera_y, camera_z):
+        """좌표 변환 테스트용 함수"""
+        camera_coord = np.array([camera_x, camera_y, camera_z], dtype=float)
+        base_coord = self.camera_to_base(camera_coord)
+        self.get_logger().info(f"TEST: Camera [{camera_x}, {camera_y}, {camera_z}] -> Base {base_coord}")
+
+        # 실제로 그 위치로 이동해보기
+        result = self.move_ik(*base_coord)
+        self.get_logger().info(f"TEST: Move result = {result}")
+        return result
+
+    # def 
 
 def main():
     rclpy.init()

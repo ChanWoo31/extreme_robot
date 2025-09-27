@@ -47,7 +47,7 @@ setup(
             'robot_arm_sj = robot_arm_pkg.robot_arm_sj:main',
             'serial_test = robot_arm_pkg.serial_test:main',
             'test_opencv = robot_arm_pkg.test_opencv:main',
-            'virtual_camera_test = robot_arm_pkg.virtual_camera_test:main',
+            'vision = robot_arm_pkg.vision:main',
             'motor_test = robot_arm_pkg.motor_test:main',
         ],
     },

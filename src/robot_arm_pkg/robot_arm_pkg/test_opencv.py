@@ -83,12 +83,16 @@ class RealSenseColorTracker(Node):
         self.timer = self.create_timer(0.03, self.process_frame)  # 30 FPS
 
     def color_callback(self, msg):
-        color = msg.data.lower()
-        if color in self.color_ranges:
+        color = msg.data.lower().strip()
+        if color == "" or color == "stop":
+            # 빈 문자열이나 "stop"이면 색상 추적 중지
+            self.target_color = None
+            self.get_logger().info('Color tracking stopped')
+        elif color in self.color_ranges:
             self.target_color = color
             self.get_logger().info(f'Target color set to: {color}')
         else:
-            self.get_logger().warn(f'Unknown color: {color}. Available colors: blue, green, orange')
+            self.get_logger().warn(f'Unknown color: {color}. Available colors: blue, green, orange, or empty string to stop')
 
     def init_realsense(self):
         self.TIMEOUT_MS = 15000

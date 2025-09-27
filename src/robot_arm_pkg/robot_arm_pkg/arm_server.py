@@ -11,6 +11,7 @@ from dynamixel_sdk import PortHandler, PacketHandler, GroupSyncWrite
 
 from arm_interfaces.srv import ArmDoTask
 from arm_interfaces.msg import DetectedObject
+from std_msgs.msg import String
 
 from .missions_robotarm import get_mission_handler, get_available_missions
 
@@ -30,6 +31,18 @@ class ArmController(Node):
         self.detected_sub = self.create_subscription(
             DetectedObject, 'detected_objects', self.handle_detected_object, 10
         )
+
+        # 색상 추적용 서브스크라이버
+        self.direction_subscriber = self.create_subscription(
+            String, '/direction', self.direction_callback, 10
+        )
+
+        # 색상 추적 상태
+        self.current_direction = None
+        self.color_tracking_active = False
+
+        # ebox 위치 추적 상태
+        self.latest_ebox_detection = None
 
         # 미션 시스템 초기화
         self.available_missions = get_available_missions()
@@ -437,6 +450,14 @@ class ArmController(Node):
         """박스 pick 시퀀스"""
         self.get_logger().info("박스 pick 시퀀스 시작")
         self.gripper(False)  # 그리퍼 열기
+        self.move_from_home_ticks(offset_j2=-4048, offset_j3=952, offset_j4=0)
+        time.sleep(4.0)
+
+        # ebox 위치 감지 및 베이스 정렬
+        self.get_logger().info("Aligning with ebox position...")
+        if not self.align_with_ebox_position(max_attempts=15, timeout=20.0):
+            self.get_logger().warn("Failed to align with ebox, continuing with pick sequence")
+
         self.move_from_home_ticks(offset_j2=-7748, offset_j3=2048, offset_j4=2187)
         time.sleep(7.0)
         self.gripper(True)  # 그리퍼 닫기
@@ -447,56 +468,157 @@ class ArmController(Node):
         self.get_logger().info("박스 pick 시퀀스 완료")
         return True
 
-    def led_button_press_sequence(self, camera_left_distance, camera_right_distance, center_distance_threshold=0.05):
+    def direction_callback(self, msg):
+        """RealSense 색상 추적에서 오는 방향 정보 처리"""
+        if self.color_tracking_active:
+            self.current_direction = msg.data
+            self.get_logger().info(f"Received direction: {self.current_direction}")
+
+    def publish_color_target(self, color):
+        """색상 추적 목표 색상 설정"""
+        msg = String()
+        msg.data = color
+        self.target_color_publisher.publish(msg)
+        self.get_logger().info(f"Published target color: {color}")
+
+    def stop_color_tracking(self):
+        """색상 추적 중지"""
+        msg = String()
+        msg.data = ""  # 빈 문자열로 추적 중지
+        self.target_color_publisher.publish(msg)
+        self.color_tracking_active = False
+        self.get_logger().info("Color tracking stopped")
+
+    def led_button_press_sequence(self):
         """
-        LED 버튼 누르기 전체 시퀀스
+        LED 버튼 누르기 전체 시퀀스 (외부 색상 신호 대기)
         1. 위로 올리기 (충돌 방지)
-        2. 베이스 회전으로 중앙점 맞추기
-        3. 버튼 누르기
-        4. 홈으로 복귀
+        2. 외부 색상 토픽 대기 (test_opencv에서 /target_color 받을 때까지)
+        3. 베이스 회전으로 중앙점 맞추기 (left/right 신호 기반)
+        4. center 신호 받으면 버튼 누르기
+        5. 홈으로 복귀
         """
 
         # 1단계: 위로 올리기 (안전 위치)
+        self.get_logger().info("Step 1: Moving to safe position")
         if not self.move_to_safe_position():
             self.get_logger().error("Failed to move to safe position")
             return False
 
-        # 2단계: 베이스 회전으로 중앙점 맞추기
-        if not self.align_camera_center(camera_left_distance, camera_right_distance, center_distance_threshold):
-            self.get_logger().error("Failed to align camera center")
+        # 2단계: 외부 색상 신호 대기
+        self.get_logger().info("Step 2: Waiting for external color signal...")
+        self.color_tracking_active = True
+        self.current_direction = None
+
+        # 외부에서 색상 토픽이 발행될 때까지 대기
+        # (누군가 test_opencv의 /target_color 토픽으로 색상을 보내줄 때까지)
+
+        # 3단계: 베이스 회전으로 중앙점 맞추기
+        self.get_logger().info("Step 3: Aligning with color target")
+        if not self.align_with_color_target(max_attempts=20, timeout=30.0):  # 타임아웃 증가
+            self.get_logger().error("Failed to align with color target")
+            self.color_tracking_active = False
             return False
 
-        # 3단계: 버튼 누르기
+        # 4단계: 색상 추적 중지
+        self.get_logger().info("Step 4: Stopping color tracking")
+        self.stop_color_tracking()
+
+        # 5단계: 버튼 누르기
+        self.get_logger().info("Step 5: Pressing LED button")
         if not self.press_led_button_ticks():
             self.get_logger().error("Failed to press LED button")
             return False
 
-        # 4단계: 홈으로 복귀
+        # 6단계: 홈으로 복귀
+        self.get_logger().info("Step 6: Returning home")
         self.go_home_ticks()
-        self.get_logger().info("LED button press sequence completed")
+        self.get_logger().info("LED button press sequence completed successfully")
         return True
+
+    def align_with_color_target(self, max_attempts=20, timeout=10.0):
+        """색상 추적 기반 베이스 회전 정렬"""
+        attempts = 0
+        start_time = time.time()
+
+        while attempts < max_attempts and (time.time() - start_time) < timeout:
+            if self.current_direction is None:
+                # 방향 신호 대기
+                time.sleep(0.1)
+                attempts += 1
+                continue
+
+            if self.current_direction == "center":
+                self.get_logger().info("Target centered! Alignment complete")
+                return True
+
+            elif self.current_direction == "left":
+                # 목표가 왼쪽에 있으면 베이스를 반시계방향으로 회전
+                self.rotate_base_by_ticks(-15)
+                self.get_logger().info("Rotating base counter-clockwise")
+
+            elif self.current_direction == "right":
+                # 목표가 오른쪽에 있으면 베이스를 시계방향으로 회전
+                self.rotate_base_by_ticks(15)
+                self.get_logger().info("Rotating base clockwise")
+
+            time.sleep(0.3)  # 회전 후 안정화 대기
+            attempts += 1
+
+        self.get_logger().warn(f"Failed to align after {attempts} attempts or {timeout}s timeout")
+        return False
+
+    def align_with_ebox_position(self, max_attempts=15, timeout=20.0, threshold=30.0):
+        """ebox 감지 정보 기반 베이스 회전 정렬"""
+        attempts = 0
+        start_time = time.time()
+
+        while attempts < max_attempts and (time.time() - start_time) < timeout:
+            if self.latest_ebox_detection is None:
+                # ebox 감지 대기
+                self.get_logger().info("Waiting for ebox detection...")
+                time.sleep(0.2)
+                attempts += 1
+                continue
+
+            # 중앙점으로부터의 x축 거리 확인
+            distance_x = self.latest_ebox_detection.distance_from_center_x
+
+            self.get_logger().info(f"Ebox distance from center_x: {distance_x:.1f}, threshold: {threshold}")
+
+            if abs(distance_x) <= threshold:
+                self.get_logger().info("Ebox centered! Alignment complete")
+                return True
+
+            elif distance_x < -threshold:
+                # ebox가 왼쪽에 있으면 베이스를 반시계방향으로 회전
+                self.rotate_base_by_ticks(-15)
+                self.get_logger().info("Rotating base counter-clockwise (ebox on left)")
+
+            elif distance_x > threshold:
+                # ebox가 오른쪽에 있으면 베이스를 시계방향으로 회전
+                self.rotate_base_by_ticks(15)
+                self.get_logger().info("Rotating base clockwise (ebox on right)")
+
+            time.sleep(0.3)  # 회전 후 안정화 대기
+            attempts += 1
+
+        self.get_logger().warn(f"Failed to align with ebox after {attempts} attempts or {timeout}s timeout")
+        return False
 
     def move_to_safe_position(self):
         """1단계: 안전한 높은 위치로 이동 (틱값 하드코딩)"""
         # TODO: 실제 측정 후 안전한 틱값으로 교체
         safe_ticks = [
-            512,   # J1: 베이스 중앙
-            1500,  # J2: 약간 앞으로 (안전 높이)
-            2500,  # J3: 위쪽
-            2048   # J4: 중립
+            204,   # J1: 베이스 중앙
+            -4057,  # J2: 약간 앞으로 (안전 높이)
+            3953,  # J3: 위쪽
+            -268   # J4: 중립
         ]
 
         try:
-            # 베이스 이동
-            self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, safe_ticks[0])
-
-            # J2,J3,J4 동기 이동
-            self.sync_write.clearParam()
-            for dxl_id, tick in zip(self.ids_x, safe_ticks[1:]):
-                self.sync_write.addParam(dxl_id, self.int32_to_le(int(tick)))
-            self.sync_write.txPacket()
-
-            time.sleep(2.0)  # 이동 완료 대기
+            self.move_from_home_ticks(offset_j1=safe_ticks[0], offset_j2=safe_ticks[1], offset_j3=safe_ticks[2], offset_j4=safe_ticks[3])
+            time.sleep(5.0)  # 이동 완료 대기
             self.get_logger().info("Moved to safe position")
             return True
 
@@ -554,39 +676,40 @@ class ArmController(Node):
     def press_led_button_ticks(self):
         """3단계: 미리 정의된 틱값으로 버튼 누르기"""
         # TODO: 실제 측정 후 버튼 누르는 틱값으로 교체
-        press_ticks = [
-            1800,  # J2: 버튼 위치로
-            2200,  # J3: 버튼 높이로
-            2048   # J4: 누르기 자세
+        press_near_1_ticks = [
+            -4057,  # J2: 버튼 위치로
+            3953,  # J3: 버튼 높이로
+            1232   # J4: 누르기 자세
+        ]
+
+        press_near_2_ticks = [
+            -4545,  # J2: 버튼 위치로
+            2953,  # J3: 버튼 높이로
+            3482   # J4: 누르기 자세
         ]
 
         push_ticks = [
-            1850,  # J2: 살짝 더 앞으로 (누르기)
-            2200,  # J3: 높이 유지
-            2048   # J4: 자세 유지
+            -4545,  # J2: 살짝 더 앞으로 (누르기)
+            2425,  # J3: 높이 유지
+            3482   # J4: 자세 유지
         ]
 
         try:
             # 1. 버튼 앞 위치로 이동
-            self.sync_write.clearParam()
-            for dxl_id, tick in zip(self.ids_x, press_ticks):
-                self.sync_write.addParam(dxl_id, self.int32_to_le(int(tick)))
-            self.sync_write.txPacket()
+            self.move_from_home_ticks(offset_j2=press_near_1_ticks[0], offset_j3=press_near_1_ticks[1], offset_j4=press_near_1_ticks[2])
+            time.sleep(2.0)
+
+            # 2 버튼 앞 위치로 이동 2
+            self.move_from_home_ticks(offset_j2=press_near_2_ticks[0], offset_j3=press_near_2_ticks[1], offset_j4=press_near_2_ticks[2])
+            time.sleep(2.0)
+
+            # 3 버튼 누르기
+            self.move_from_home_ticks(offset_j2=push_ticks[0], offset_j3=push_ticks[1], offset_j4=push_ticks[2])
             time.sleep(1.0)
 
-            # 2. 버튼 누르기
-            self.sync_write.clearParam()
-            for dxl_id, tick in zip(self.ids_x, push_ticks):
-                self.sync_write.addParam(dxl_id, self.int32_to_le(int(tick)))
-            self.sync_write.txPacket()
-            time.sleep(0.5)
-
-            # 3. 원위치
-            self.sync_write.clearParam()
-            for dxl_id, tick in zip(self.ids_x, press_ticks):
-                self.sync_write.addParam(dxl_id, self.int32_to_le(int(tick)))
-            self.sync_write.txPacket()
-            time.sleep(0.5)
+            # 4 원위치
+            self.move_from_home_ticks(offset_j2=press_near_1_ticks[0], offset_j3=press_near_1_ticks[1], offset_j4=press_near_1_ticks[2])
+            time.sleep(1.0)
 
             self.get_logger().info("LED button pressed successfully")
             return True
@@ -652,8 +775,8 @@ class ArmController(Node):
         elif task == 'go_autonomous_driving': self.go_autonomous_driving_position(); ok = True
         elif task == 'go_ik_ready': self.go_ik_ready_position(); ok = True
         elif task == 'led_button_press':
-            # x, y는 left_distance, right_distance로 사용
-            ok = self.led_button_press_sequence(x, y, center_distance_threshold=0.05)
+            # 외부 색상 신호를 기다리는 시퀀스 실행
+            ok = self.led_button_press_sequence()
         elif task == 'debug_ik':
             # IK 디버깅용
             result = self.debug_ik_without_limits(x, y, z)
@@ -676,7 +799,11 @@ class ArmController(Node):
         """감지된 물체에 대해 자동으로 동작 수행"""
         object_name = msg.object_name.lower()
 
-        self.get_logger().info(f"Object detected: {object_name} at ({msg.x}, {msg.y}, {msg.z})")
+        # ebox 감지 정보 저장 (align_with_ebox_position에서 사용)
+        if object_name == "ebox":
+            self.latest_ebox_detection = msg
+
+        self.get_logger().info(f"Object detected: {object_name} at pixel ({msg.pixel_x}, {msg.pixel_y}), distance from center: ({msg.distance_from_center_x}, {msg.distance_from_center_y})")
 
         # 미션 핸들러 가져오기
         mission_handler = get_mission_handler(object_name, self)

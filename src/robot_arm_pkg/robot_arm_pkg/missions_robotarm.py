@@ -34,13 +34,10 @@ class Mission1ButtonPress(MissionBase):
 
     def execute(self, x, y, z):
         try:
-            camera_coord = np.array([x, y, z], dtype=float)
-            base_coord = self.arm.camera_to_base(camera_coord)
+            self.log_info(f"버튼 누르기 미션 시작 - 픽셀 좌표: ({x}, {y}, {z})")
 
-            self.log_info(f"버튼 누르기 미션 시작 - 카메라 좌표: {camera_coord}, 베이스 좌표: {base_coord}")
-
-            # 버튼 누르기 시퀀스 실행
-            success = self.arm.press_button_seq(base_coord)
+            # 버튼 누르기 시퀀스 실행 (LED 버튼 시퀀스 사용)
+            success = self.arm.led_button_press_sequence()
 
             if success:
                 self.log_info("버튼 누르기 미션 성공")
@@ -58,16 +55,11 @@ class Mission2HandleTurn(MissionBase):
 
     def execute(self, x, y, z):
         try:
-            camera_coord = np.array([x, y, z], dtype=float)
-            base_coord = self.arm.camera_to_base(camera_coord)
+            self.log_info(f"핸들 돌리기 미션 시작 - 픽셀 좌표: ({x}, {y}, {z})")
 
-            self.log_info(f"핸들 돌리기 미션 시작 - 카메라 좌표: {camera_coord}, 베이스 좌표: {base_coord}")
-
-            # 핸들 돌리기 시퀀스 실행 (arm_server.py에서 구현 필요)
-            # success = self.arm.turn_handle_seq(base_coord)
-
-            # 임시로 간단한 그립 + 회전 동작
-            success = self._handle_turn_sequence(base_coord)
+            # 핸들 돌리기 시퀀스 실행 (현재 미구현)
+            self.log_info("핸들 돌리기 시퀀스는 아직 구현되지 않았습니다.")
+            success = False
 
             if success:
                 self.log_info("핸들 돌리기 미션 성공")
@@ -107,13 +99,10 @@ class Mission3BoxGrip(MissionBase):
 
     def execute(self, x, y, z):
         try:
-            camera_coord = np.array([x, y, z], dtype=float)
-            base_coord = self.arm.camera_to_base(camera_coord)
+            self.log_info(f"박스 그립 미션 시작 - 픽셀 좌표: ({x}, {y}, {z})")
 
-            self.log_info(f"박스 그립 미션 시작 - 카메라 좌표: {camera_coord}, 베이스 좌표: {base_coord}")
-
-            # 박스 그립 시퀀스 실행
-            success = self.arm.move_ik(*base_coord)
+            # 박스 그립 시퀀스 실행 (pick_seq 사용)
+            success = self.arm.pick_seq()
 
             if success:
                 self.log_info("박스 그립 미션 성공")
@@ -131,13 +120,10 @@ class Mission4PlaceBox(MissionBase):
 
     def execute(self, x, y, z):
         try:
-            camera_coord = np.array([x, y, z], dtype=float)
-            base_coord = self.arm.camera_to_base(camera_coord)
+            self.log_info(f"박스 놓기 미션 시작 - 픽셀 좌표: ({x}, {y}, {z})")
 
-            self.log_info(f"박스 놓기 미션 시작 - 카메라 좌표: {camera_coord}, 베이스 좌표: {base_coord}")
-
-            # 박스 놓기 시퀀스 실행
-            success = self.arm.place_seq(base_coord)
+            # 박스 놓기 시퀀스 실행 (place_seq 사용)
+            success = self.arm.place_seq([x, y, z])
 
             if success:
                 self.log_info("박스 놓기 미션 성공")

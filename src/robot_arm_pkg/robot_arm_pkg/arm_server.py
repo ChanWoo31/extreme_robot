@@ -1,6 +1,7 @@
 # arm server
 import numpy as np
 import time
+import threading
 from ikpy.link import OriginLink, DHLink
 from ikpy.chain import Chain
 
@@ -43,6 +44,17 @@ class ArmController(Node):
 
         # ebox 위치 추적 상태
         self.latest_ebox_detection = None
+
+        # 미션 실행 상태 플래그
+        self.mission_in_progress = False
+        self.ebox_aligned = False  # ebox 정렬 완료 플래그
+        self.last_mission_time = 0  # 마지막 미션 완료 시간
+        self.mission_cooldown = 10.0  # 10초 쿨다운
+
+        # 자동 미션 제어
+        self.enable_auto_mission = False  # 자동 미션 기본 꺼짐
+        self.active_task = None           # 현재 실행 중 태스크명
+        self.state_lock = threading.Lock()
 
         # 미션 시스템 초기화
         self.available_missions = get_available_missions()
@@ -332,6 +344,25 @@ class ArmController(Node):
         time.sleep(self.dt)
         return True
 
+    def move_xl_only(self, offset_j2=0, offset_j3=0, offset_j4=0):
+        """베이스는 유지하고 J2, J3, J4만 이동"""
+        # J2, J3, J4 - xl_home_ticks에서 오프셋
+        target_positions = [
+            self.xl_home_ticks[0] + offset_j2,  # J2
+            self.xl_home_ticks[1] + offset_j3,  # J3
+            self.xl_home_ticks[2] + offset_j4   # J4
+        ]
+
+        # 동기 전송 (베이스 제외)
+        self.sync_write.clearParam()
+        for dxl_id, target_pos in zip(self.ids_x, target_positions):
+            self.sync_write.addParam(dxl_id, self.int32_to_le(int(target_pos)))
+
+        self.sync_write.txPacket()
+
+        time.sleep(self.dt)
+        return True
+
     def solve_ik_q(self, x, y, z):
         # 여러 초기값으로 IK 시도하여 리미트 내 해 찾기
         initial_positions = [
@@ -450,20 +481,26 @@ class ArmController(Node):
         """박스 pick 시퀀스"""
         self.get_logger().info("박스 pick 시퀀스 시작")
         self.gripper(False)  # 그리퍼 열기
-        self.move_from_home_ticks(offset_j2=-4048, offset_j3=952, offset_j4=0)
-        time.sleep(4.0)
+        # 카메라 다운룩 포즈 등 안전자세 진입
+        self.move_from_home_ticks(offset_j2=-3500, offset_j3=952, offset_j4=0)
+        self._sleep(3.0)
 
-        # ebox 위치 감지 및 베이스 정렬
         self.get_logger().info("Aligning with ebox position...")
-        if not self.align_with_ebox_position(max_attempts=15, timeout=20.0):
-            self.get_logger().warn("Failed to align with ebox, continuing with pick sequence")
+        aligned = self.align_with_ebox_position(max_attempts=20, timeout=25.0)
+        if not aligned:
+            self.get_logger().warn("Alignment failed. Abort pick.")
+            self.go_home_ticks()
+            self.get_logger().info("박스 pick 시퀀스 완료")
+            return False
 
-        self.move_from_home_ticks(offset_j2=-7748, offset_j3=2048, offset_j4=2187)
-        time.sleep(7.0)
+        # 정렬된 경우에만 접근·그립
+        self.move_xl_only(offset_j2=-7748, offset_j3=2048, offset_j4=2187)
+        self._sleep(5.0)
         self.gripper(True)  # 그리퍼 닫기
-        time.sleep(3.0)
-        self.move_from_home_ticks(offset_j2=-4120, offset_j3=2048, offset_j4=2187)
-        time.sleep(2.0)
+        self._sleep(1.5)
+        self.move_xl_only(offset_j2=-4120, offset_j3=2048, offset_j4=2187)
+        self._sleep(3.0)
+
         self.go_home_ticks()
         self.get_logger().info("박스 pick 시퀀스 완료")
         return True
@@ -568,39 +605,58 @@ class ArmController(Node):
         self.get_logger().warn(f"Failed to align after {attempts} attempts or {timeout}s timeout")
         return False
 
-    def align_with_ebox_position(self, max_attempts=15, timeout=20.0, threshold=30.0):
-        """ebox 감지 정보 기반 베이스 회전 정렬"""
+    def align_with_ebox_position(self, max_attempts=25, timeout=30.0, threshold=15.0):
+        """ebox 감지 정보 기반 베이스 회전 정렬 (정교한 중앙 정렬)"""
         attempts = 0
-        start_time = time.time()
+        start = time.time()
+        last_dx = None
+        stagnant = 0
 
-        while attempts < max_attempts and (time.time() - start_time) < timeout:
-            if self.latest_ebox_detection is None:
-                # ebox 감지 대기
+        while attempts < max_attempts and (time.time() - start) < timeout:
+            det = self.latest_ebox_detection
+            if det is None:
                 self.get_logger().info("Waiting for ebox detection...")
-                time.sleep(0.2)
+                time.sleep(0.1)
                 attempts += 1
                 continue
 
-            # 중앙점으로부터의 x축 거리 확인
-            distance_x = self.latest_ebox_detection.distance_from_center_x
+            dx = det.distance_from_center_x
+            self.get_logger().info(f"Ebox distance from center_x: {dx:.1f}, threshold: {threshold}")
 
-            self.get_logger().info(f"Ebox distance from center_x: {distance_x:.1f}, threshold: {threshold}")
-
-            if abs(distance_x) <= threshold:
+            if abs(dx) <= threshold:
                 self.get_logger().info("Ebox centered! Alignment complete")
+                self.ebox_aligned = True
                 return True
 
-            elif distance_x < -threshold:
-                # ebox가 왼쪽에 있으면 베이스를 반시계방향으로 회전
-                self.rotate_base_by_ticks(-15)
-                self.get_logger().info("Rotating base counter-clockwise (ebox on left)")
+            # 개선 여부 체크
+            if last_dx is not None and abs(dx) >= abs(last_dx) - 1.0:
+                stagnant += 1
+            else:
+                stagnant = 0
+            last_dx = dx
+            if stagnant >= 4:
+                self.get_logger().warn("Alignment stalled (no improvement 4 steps). Abort.")
+                return False
 
-            elif distance_x > threshold:
-                # ebox가 오른쪽에 있으면 베이스를 시계방향으로 회전
-                self.rotate_base_by_ticks(15)
-                self.get_logger().info("Rotating base clockwise (ebox on right)")
+            # 정교한 스텝 크기 조정
+            if abs(dx) > 60:
+                step = 12    # 멀리 있을 때: 큰 스텝
+            elif abs(dx) > 30:
+                step = 6     # 중간 거리: 중간 스텝
+            elif abs(dx) > 15:
+                step = 3     # 가까운 거리: 작은 스텝
+            else:
+                step = 1     # 매우 가까운 거리: 미세 조정
 
-            time.sleep(0.3)  # 회전 후 안정화 대기
+            if dx < -threshold:
+                self.rotate_base_by_ticks(+step)   # 좌측 → 시계방향
+                self.get_logger().info(f"Rotating base clockwise +{step} ticks (ebox on left)")
+            else:
+                self.rotate_base_by_ticks(-step)   # 우측 → 반시계
+                self.get_logger().info(f"Rotating base counter-clockwise -{step} ticks (ebox on right)")
+
+            # 프레임 갱신 대기
+            time.sleep(0.3)
             attempts += 1
 
         self.get_logger().warn(f"Failed to align with ebox after {attempts} attempts or {timeout}s timeout")
@@ -764,11 +820,29 @@ class ArmController(Node):
         # self.get_logger().info(f"Camera coord: {camera_coord}, Base coord: {base_coord}")
 
         ok = False
-        if task == 'press_button':
+        if task == 'pick':
+            with self.state_lock:
+                if self.active_task is not None:
+                    response.success = False
+                    response.message = f'busy: {self.active_task}'
+                    return response
+                self.active_task = 'pick'
+            # 비동기 실행 → 스핀은 계속 돌아감 → 감지 콜백 수신 가능
+            threading.Thread(target=self._run_pick_once, args=(x,y,z), daemon=True).start()
+            ok = True
+            response.success = ok
+            response.message = 'started'
+            return response
+        elif task == 'enable_auto':
+            self.enable_auto_mission = True
+            ok = True
+        elif task == 'disable_auto':
+            self.enable_auto_mission = False
+            ok = True
+        elif task == 'press_button':
             self.get_logger().warn("press_button_seq function not implemented")
             ok = False
         elif task == 'open_door': ok = self.open_door()
-        elif task == 'pick': ok = self.pick_seq([x, y, z])
         elif task == 'place': ok = self.place_seq([x, y, z])
         elif task == 'move': self.move_ik(x, y, z); ok = True
         elif task == 'go_home': self.go_home_ticks(); ok = True
@@ -784,6 +858,11 @@ class ArmController(Node):
         elif task == 'move_from_home':
             # go_home_ticks 기준 오프셋 이동 (x=offset_j1, y=offset_j2, z=offset_j3)
             ok = self.move_from_home_ticks(int(x), int(y), int(z), 0)
+        elif task == 'reset_ebox_aligned':
+            # ebox 정렬 플래그 리셋
+            self.ebox_aligned = False
+            self.get_logger().info("Ebox alignment flag reset")
+            ok = True
         else:
             # 미션 시스템으로 시도
             mission_handler = get_mission_handler(task, self)
@@ -795,15 +874,56 @@ class ArmController(Node):
         response.message = 'done' if ok else 'failed'
         return response
 
+    def _run_pick_once(self, x, y, z):
+        """비동기 픽 실행 함수"""
+        try:
+            self.mission_in_progress = True
+            # 자동 미션이 끼어들지 않도록 강제 OFF
+            auto_prev = self.enable_auto_mission
+            self.enable_auto_mission = False
+
+            self.pick_seq([x, y, z])  # 내부에서 정렬 포함. 1회 수행
+
+            # 쿨다운 타임스탬프 갱신(자동미션과 동일 정책 재사용)
+            self.last_mission_time = time.time()
+        except Exception as e:
+            self.get_logger().error(f"pick_once failed: {e}")
+        finally:
+            self.mission_in_progress = False
+            self.ebox_aligned = False
+            self.enable_auto_mission = auto_prev
+            with self.state_lock:
+                self.active_task = None
+            self.get_logger().info("pick one-shot finished")
+
+    def _sleep(self, dt):
+        """짧은 슬립으로 쪼개서 콜백 응답성 개선"""
+        t0 = time.time()
+        while time.time() - t0 < dt:
+            time.sleep(0.02)
+
     def handle_detected_object(self, msg):
         """감지된 물체에 대해 자동으로 동작 수행"""
         object_name = msg.object_name.lower()
 
-        # ebox 감지 정보 저장 (align_with_ebox_position에서 사용)
+        # 최신 ebox 위치는 항상 갱신
         if object_name == "ebox":
             self.latest_ebox_detection = msg
 
+        # 자동 미션이 꺼져 있으면 즉시 반환
+        if not self.enable_auto_mission:
+            return
+
         self.get_logger().info(f"Object detected: {object_name} at pixel ({msg.pixel_x}, {msg.pixel_y}), distance from center: ({msg.distance_from_center_x}, {msg.distance_from_center_y})")
+
+        # 미션이 이미 실행 중이면 무시
+        if self.mission_in_progress:
+            return
+
+        # 쿨다운 체크 (마지막 미션 완료 후 일정 시간 대기)
+        current_time = time.time()
+        if current_time - self.last_mission_time < self.mission_cooldown:
+            return
 
         # 미션 핸들러 가져오기
         mission_handler = get_mission_handler(object_name, self)
@@ -814,12 +934,23 @@ class ArmController(Node):
             return
 
         # 미션 실행
+        self.mission_in_progress = True
+        self.get_logger().info(f"Starting mission for {object_name}")
+
         try:
-            success = mission_handler.execute(msg.x, msg.y, msg.z)
+            # DetectedObject 메시지 구조 변경으로 인한 수정
+            # pixel_x, pixel_y를 x, y로 전달하고 z는 0으로 설정
+            success = mission_handler.execute(msg.pixel_x, msg.pixel_y, 0.0)
             result = "SUCCESS" if success else "FAILED"
             self.get_logger().info(f"Mission {object_name}: {result}")
         except Exception as e:
             self.get_logger().error(f"Mission {object_name} failed with exception: {e}")
+        finally:
+            # 미션 완료 후 플래그 해제 및 쿨다운 시작
+            self.mission_in_progress = False
+            self.ebox_aligned = False  # ebox 정렬 플래그 초기화
+            self.last_mission_time = time.time()  # 마지막 미션 완료 시간 기록
+            self.get_logger().info(f"Mission for {object_name} completed, cooldown for {self.mission_cooldown}s")
 
     def execute_mission_by_name(self, mission_name, x, y, z):
         """미션 이름으로 직접 미션 실행 (테스트/디버깅용)"""
@@ -829,8 +960,6 @@ class ArmController(Node):
             return False
 
         return mission_handler.execute(x, y, z)
-
- 
 
     # def 
 

@@ -67,6 +67,8 @@ class CameraGrabber:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.w)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.h)
         cap.set(cv2.CAP_PROP_FPS, self.fps)
+        # 버퍼 크기를 최소화하여 지연 감소
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if not cap.isOpened():
             print(f"[{self.name}] Failed to open /dev/video{self.dev}")
             return False
@@ -103,6 +105,14 @@ class CameraGrabber:
     def get(self):
         with self.lock:
             return None if self.frame is None else self.frame.copy()
+
+    def flush_buffer(self):
+        """카메라 버퍼를 비워서 최신 프레임 확보"""
+        if self.cap is None or not self.cap.isOpened():
+            return
+        # 버퍼에 있는 오래된 프레임들을 버리고 최신 프레임 읽기
+        for _ in range(5):  # 5프레임 정도 버퍼 비우기
+            self.cap.read()
 
     def stop(self):
         self.running = False

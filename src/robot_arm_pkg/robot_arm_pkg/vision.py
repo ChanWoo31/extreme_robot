@@ -134,6 +134,7 @@ class DualCamColorTracker(Node):
         self.direction_pub = self.create_publisher(String, '/direction', 10)
         self.names_pub = self.create_publisher(String, '/detected_object_names', 10)
         self.objects_pub = self.create_publisher(DetectedObject, '/detected_objects', 10)
+        self.color_detected_pub = self.create_publisher(String, '/detected_colors', 10)
 
         # HSV 범위
         self.color_ranges = {
@@ -236,6 +237,33 @@ class DualCamColorTracker(Node):
         direction_info = "idle"
         direction = None
 
+        # 모든 색상 감지 (항상 실행)
+        detected_colors = []
+        if frm0 is not None:
+            for color_name, (low, high) in self.color_ranges.items():
+                cpt, mask = self.find_centroid(vis0, low, high)
+                if cpt is not None:
+                    detected_colors.append(color_name)
+                    # 감지된 색상을 시각적으로 표시 (작은 원으로)
+                    cx, cy = cpt
+                    if color_name == 'blue':
+                        color = (255, 0, 0)
+                    elif color_name == 'green':
+                        color = (0, 255, 0)
+                    else:  # orange
+                        color = (0, 165, 255)
+                    cv2.circle(vis0, (cx, cy), 4, color, -1)
+                    cv2.putText(vis0, color_name, (cx-15, cy-20),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+        # 감지된 색상들 퍼블리시
+        if detected_colors:
+            colors_msg = ",".join(detected_colors)
+        else:
+            colors_msg = "none"
+        self.color_detected_pub.publish(String(data=colors_msg))
+
+        # 타겟 색상 추적 (기존 로직)
         if self.target_color is not None and frm0 is not None:
             low, high = self.color_ranges[self.target_color]
             cpt, mask = self.find_centroid(vis0, low, high)
@@ -263,7 +291,13 @@ class DualCamColorTracker(Node):
                 self.direction_pub.publish(String(data=direction))
                 direction_info = f'{direction} ({self.target_color})'
             else:
+                # 타겟 색상이 감지되지 않으면 "none" 퍼블리시
+                self.direction_pub.publish(String(data="none"))
                 direction_info = f'tracking {self.target_color}...'
+        elif self.target_color is not None:
+            # 타겟 색상이 설정되어 있지만 프레임이 없으면 "none"
+            self.direction_pub.publish(String(data="none"))
+            direction_info = "no frame"
 
         # 중앙선 (리사이즈 전 기준으로 그리고 함께 스케일됨)
         cv2.line(vis0, (goal_x, 0), (goal_x, h0), (255, 0, 0), 2)

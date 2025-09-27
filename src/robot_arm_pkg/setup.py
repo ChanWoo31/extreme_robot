@@ -35,6 +35,7 @@ setup(
     entry_points={
         'console_scripts': [
             'arm_server = robot_arm_pkg.arm_server:main',
+            'unified_arm_controller = robot_arm_pkg.unified_arm_controller:main',
             'manual_publisher = robot_arm_pkg.manual_publisher:main',
             'controller_node_pub = robot_arm_pkg.controller_node_pub:main',
             'dynamixel_bus_node = robot_arm_pkg.dynamixel_bus_node:main',

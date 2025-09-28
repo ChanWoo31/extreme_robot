@@ -26,10 +26,7 @@ class UnifiedArmController(Node):
     def __init__(self):
         super().__init__('arm_controller')
 
-        # ---------- 모드 ----------
-        self.mode = self.declare_parameter('default_mode', 'manual').get_parameter_value().string_value
-        self.mode_pub = self.create_publisher(String, '/arm/mode_state', 1)
-        self.mode_sub = self.create_subscription(String, '/arm/mode', self._on_mode_msg, 10)
+        # ---------- 취소 이벤트 ----------
         self.cancel_event = threading.Event()
 
         # QoS (센서용)
@@ -79,7 +76,7 @@ class UnifiedArmController(Node):
         self.x_lift_down_tick = self.declare_parameter('x_lift_down_tick', -1365).get_parameter_value().integer_value
 
         self.xl_back_id  = self.declare_parameter('xl_back_id', 7).get_parameter_value().integer_value
-        self.back_up_tick     = self.declare_parameter('back_up_tick',    -5120).get_parameter_value().integer_value
+        self.back_up_tick     = self.declare_parameter('back_up_tick',    -2560).get_parameter_value().integer_value
         self.back_center_tick = self.declare_parameter('back_center_tick', 0).get_parameter_value().integer_value
         self.back_down_tick   = self.declare_parameter('back_down_tick',  5120).get_parameter_value().integer_value
         self.back_down_45_tick= self.declare_parameter('back_down_45_tick', 2560).get_parameter_value().integer_value
@@ -160,33 +157,7 @@ class UnifiedArmController(Node):
         self.camera_offset = np.array([-0.084, 0.0, 0.04155])
         self.camera_rotation = np.eye(3)
 
-        self._publish_mode()
-
-        self.get_logger().info(f'UnifiedArmController ready (mode={self.mode})')
-
-    # ---------- 모드 전환 ----------
-    def _on_mode_msg(self, msg: String):
-        m = msg.data.strip().lower()
-        if m not in ('manual','auto'): return
-        self.set_mode(m)
-
-    def set_mode(self, m: str):
-        if m == self.mode:
-            self._publish_mode();
-            return
-        self.get_logger().info(f"Switching mode: {self.mode} -> {m}")
-        # 진행 중 태스크 안전 중단 신호
-        self.cancel_event.set()
-        # 약간 대기
-        time.sleep(0.1)
-        self.cancel_event.clear()
-        # 자동미션은 수동으로만 제어 (바퀴 구동부에서 enable_auto 명령으로만 활성화)
-        # self.enable_auto_mission = (m == 'auto')
-        self.mode = m
-        self._publish_mode()
-
-    def _publish_mode(self):
-        self.mode_pub.publish(String(data=self.mode))
+        self.get_logger().info('UnifiedArmController ready')
 
     # ---------- 공용 유틸 (하드웨어/수학) ----------
     def int32_to_le(self, v:int):
@@ -258,9 +229,6 @@ class UnifiedArmController(Node):
 
     # ---------- 매뉴얼 경로 ----------
     def on_manual_command(self, msg: String):
-        if self.mode != 'manual':
-            self.get_logger().info("manual cmd ignored (mode!=manual)")
-            return
         c = msg.data.strip().lower()
 
         # 홈
@@ -318,9 +286,6 @@ class UnifiedArmController(Node):
 
     # ---------- 자동 경로 ----------
     def handle_arm_do_task(self, request, response):
-        if self.mode != 'auto':
-            response.success = False; response.message = 'not in auto mode'; return response
-
         x, y, z, task = request.x, request.y, request.z, request.task
         ok = False
 
@@ -382,8 +347,6 @@ class UnifiedArmController(Node):
         return response
 
     def handle_detected_object(self, msg: DetectedObject):
-        if self.mode != 'auto': return
-
         object_name = msg.object_name.lower()
 
         # 최신 ebox 위치는 항상 갱신
@@ -430,7 +393,6 @@ class UnifiedArmController(Node):
             self.get_logger().info(f"Mission for {object_name} completed, cooldown for {self.mission_cooldown}s")
 
     def direction_callback(self, msg: String):
-        if self.mode != 'auto': return
         self.current_direction = msg.data
         self.get_logger().info(f"Direction updated: {self.current_direction}")
 
@@ -710,7 +672,7 @@ class UnifiedArmController(Node):
 
         self.get_logger().info("Step 5: Returning home")
         self.go_home_ticks()
-        self.move_xl_only(offset_j2=0, offset_j3=0, offset_j4=1000)
+        self.move_xl_only(offset_j2=0, offset_j3=0, offset_j4=3000)
         self.get_logger().info("LED button press sequence completed successfully")
         return True
 
@@ -880,10 +842,25 @@ class UnifiedArmController(Node):
             return False
 
     def open_door(self):
-        self.move_ik(0.34, 0.0, 0.38)
-        time.sleep(5.0)
-        self.move_ik(0.34, 0.0, 0.3)
-        return True
+        self.gripper_fully(True)
+
+        press_near_1_ticks = [-4774, 3236, 1791]
+        push_ticks = [-4888, 1823, 2413]
+
+        try:
+            self.move_xl_only(offset_j2=press_near_1_ticks[0], offset_j3=press_near_1_ticks[1], offset_j4=press_near_1_ticks[2])
+            time.sleep(4.0)
+
+            self.move_xl_only(offset_j2=push_ticks[0], offset_j3=push_ticks[1], offset_j4=push_ticks[2])
+            time.sleep(2.0)
+
+
+            self.get_logger().info("LED button pressed successfully")
+            return True
+
+        except Exception as e:
+            self.get_logger().error(f"Failed to press LED button: {e}")
+            return False
 
     def place_seq(self, p):
         """박스 place 시퀀스"""
@@ -906,6 +883,19 @@ class UnifiedArmController(Node):
 
         self.get_logger().info("Mission 3 basic state ready")
         return True
+
+    # def mission_3_state_after_pressing_button(self):
+    #     """안전한 높은 위치로 이동"""
+    #     safe_ticks = [0, -4057, 3953, -268]
+
+    #     try:
+    #         self.move_from_home_ticks(offset_j1=safe_ticks[0], offset_j2=safe_ticks[1], offset_j3=safe_ticks[2], offset_j4=safe_ticks[3])
+    #         time.sleep(5.0)
+    #         self.get_logger().info("Moved to safe position")
+    #         return True
+    #     except Exception as e:
+    #         self.get_logger().error(f"Failed to move to safe position: {e}")
+    #         return False
 
     def _run_pick_once(self, x, y, z):
         """비동기 픽 실행 함수"""

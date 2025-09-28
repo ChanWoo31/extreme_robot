@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>final_pkg</name>
+  <version>0.0.0</version>
+  <description>Final package for extreme robot project</description>
+  <maintainer email="cwcw0301@gmail.com">han</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>dynamixel_sdk</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <exec_depend>arm_interfaces</exec_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

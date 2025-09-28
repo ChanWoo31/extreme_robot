@@ -85,8 +85,8 @@ class UnifiedArmController(Node):
         self.back_down_45_tick= self.declare_parameter('back_down_45_tick', 2560).get_parameter_value().integer_value
 
         self.grip_open_tick   = self.declare_parameter('grip_open_tick', 480).get_parameter_value().integer_value
-        self.grip_close_tick  = self.declare_parameter('grip_close_tick', 330).get_parameter_value().integer_value
-        self.grip_close_fully_tick = self.declare_parameter('grip_close_fully_tick', 0).get_parameter_value().integer_value
+        self.grip_close_tick  = self.declare_parameter('grip_close_tick', 220).get_parameter_value().integer_value
+        self.grip_close_fully_tick = self.declare_parameter('grip_close_fully_tick', 10).get_parameter_value().integer_value
         self.base_step_deg = self.declare_parameter('base_step_deg', 5.0).get_parameter_value().double_value
 
         # --- Dynamixel reg ---
@@ -223,13 +223,13 @@ class UnifiedArmController(Node):
     def gripper(self, close: bool):
         """그리퍼 열기/닫기 제어"""
         if self.ax_grip_id is None: return
-        tgt = 330 if close else 480
+        tgt = 220 if close else 460
         self.packet_ax.write2ByteTxRx(self.port, self.ax_grip_id, self.AX_ADDR_GOAL_POSITION, tgt)
 
     def gripper_fully(self, close: bool):
         """그리퍼 완전 열기/닫기 제어"""
         if self.ax_grip_id is None: return
-        tgt = 0 if close else 480
+        tgt = 10 if close else 460
         self.packet_ax.write2ByteTxRx(self.port, self.ax_grip_id, self.AX_ADDR_GOAL_POSITION, tgt)
 
     def stop_hold(self):
@@ -354,6 +354,7 @@ class UnifiedArmController(Node):
         elif task == 'go_autonomous_driving': self.go_autonomous_driving_position(); ok = True
         elif task == 'go_ik_ready': self.go_ik_ready_position(); ok = True
         elif task == 'see_around': self.ax_see_around(); ok = True
+        elif task == 'see_around_90': self.ax_see_around_90(); ok = True
         elif task == 'led_button_press':
             with self.state_lock:
                 if self.active_task is not None:
@@ -488,6 +489,33 @@ class UnifiedArmController(Node):
             time.sleep(delay)
 
             if tick == 1023:
+                break
+
+        self.get_logger().info("AX see around completed, returning home")
+        time.sleep(1.0)  # 마지막 위치에서 잠시 대기
+
+        # 홈으로 복귀
+        self.go_home_ticks()
+
+    def ax_see_around_90(self):
+        self.move_xl_only(offset_j2=0, offset_j3=0, offset_j4=1000)
+        """AX 베이스를 0틱에서 1023틱까지 천천히 회전시키고 홈으로 복귀"""
+        self.get_logger().info("Starting AX see around - rotating from 0 to 1023 ticks")
+
+        # 0틱부터 1023틱까지 천천히 회전
+        step_size = 20  # 한 번에 10틱씩 이동
+        delay = 0.2     # 각 스텝 간 0.2초 대기
+
+        for tick in range(204, 820, step_size):
+            # 마지막 스텝에서는 정확히 1023으로
+            if tick + step_size > 820:
+                tick = 820
+
+            self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, tick)
+            self.get_logger().info(f"AX base moving to tick: {tick}")
+            time.sleep(delay)
+
+            if tick == 820:
                 break
 
         self.get_logger().info("AX see around completed, returning home")
@@ -772,15 +800,15 @@ class UnifiedArmController(Node):
                 self.get_logger().warn("Alignment stalled. Abort.")
                 return False
 
-            # 정교한 스텝 크기 조정
+            # 정교한 스텝 크기 조정 (더 큰 스텝으로 개선)
             if abs(dx) > 60:
-                step = 12
+                step = 15    # 12 -> 15
             elif abs(dx) > 30:
-                step = 6
+                step = 10    # 6 -> 10
             elif abs(dx) > 15:
-                step = 3
+                step = 6     # 3 -> 6
             else:
-                step = 1
+                step = 3     # 1 -> 3
 
             if dx < -threshold:
                 self.rotate_base_by_ticks(+step)
@@ -809,17 +837,13 @@ class UnifiedArmController(Node):
             return False
 
     def rotate_base_by_ticks(self, tick_offset):
-        """베이스를 지정된 틱만큼 회전"""
+        """베이스를 지정된 틱만큼 회전 (누적 목표값 사용)"""
         try:
-            current_pos, result, error = self.packet_ax.read2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_PRESENT_POS)
-
-            if result == 0 and error == 0:
-                new_pos = max(0, min(1023, current_pos + tick_offset))
-                self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, new_pos)
-                self.get_logger().info(f"Base moved from {current_pos} to {new_pos}")
-            else:
-                self.get_logger().error("Failed to read base position")
-
+            # 현재값이 아니라 '마지막 목표값' 기준으로 누적
+            new_goal = max(0, min(1023, int(self.base_goal) + int(tick_offset)))
+            self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, new_goal)
+            self.base_goal = new_goal
+            self.get_logger().info(f"Base goal {self.base_goal} (offset {tick_offset:+d})")
         except Exception as e:
             self.get_logger().error(f"Base rotation failed: {e}")
 
@@ -865,6 +889,8 @@ class UnifiedArmController(Node):
         """박스 place 시퀀스"""
         self.get_logger().info("박스 place 시퀀스 시작")
         self.go_home_ticks()
+        time.sleep(1.0)
+        self.move_xl_only(offset_j2=-415, offset_j3=-670)
         time.sleep(1.0)
         self.gripper(False)
         self.get_logger().info("박스 place 시퀀스 완료")

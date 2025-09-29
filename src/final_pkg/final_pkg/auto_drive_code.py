@@ -5,11 +5,22 @@ from std_msgs.msg import String, Float32MultiArray
 import time
 import math
 import json
+from std_srvs.srv import Trigger
+
+from arm_interfaces.srv import ArmDoTask
+from arm_interfaces.msg import DetectedObject
+
 
 class DirectionController(Node):
     def __init__(self, pub_direction_topic='/direction_cmd'):
         super().__init__('direction_controller')
 
+        # super().__init__('arm_client')
+        # self.cli = self.create_client(ArmDoTask, 'arm_do_task')
+        # while not self.cli.wait_for_service(timeout_sec=1.0):
+        #     self.get_logger().info('Service not available, waiting...')
+        # self.req = ArmDoTask.Request()
+        
         # 퍼블리셔
         self.pub_direction = self.create_publisher(String, pub_direction_topic, 10)
         self.subscription = self.create_subscription(Float32MultiArray, 'ebimu_rpy', self.rpy_callback, 10)
@@ -19,6 +30,11 @@ class DirectionController(Node):
             self.camera_data_callback,
             10
         )
+        
+        self.arm_service_shoot = self.create_client(ArmDoTask, '/ArmDoTask')
+        while not self.arm_service_shoot.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('Arm service not available, waiting...')
+        self.get_logger().info('Arm service connected!')
 
         # 클래스 변수
         self.roll, self.pitch, self.yaw = 0.0, 0.0, 0.0
@@ -28,7 +44,20 @@ class DirectionController(Node):
         self.Straight_flag = True
         self.Straight_end_flag = True
         self.Starget_roll = 0
+        self.Stair_count = 0
+        self.Stair_end_flag = False
 
+    def arm_service(self, task):
+        request = ArmDoTask.Request()
+        request.task = task
+        
+        future = self.arm_service_shoot.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=1.0)
+        response = future.result()
+        if response.success:
+            self.get_logger().info("앙 되노")
+        else:   
+            self.get_logger().info("앙 안되노")
     # ------------------- 명령 발행 -------------------
     def send_command(self, command: str):
         msg = String()
@@ -72,16 +101,17 @@ class DirectionController(Node):
         time.sleep(3)
         self.send_command('Stop')
         time.sleep(0.5)
-        self.send_command('flift_center')
+        self.send_command('flift_down')
         time.sleep(3)
         self.send_command('blift_down')
         time.sleep(4)
         self.send_command('Go')
-        time.sleep(1)
+        time.sleep(2)
         self.send_command('Stop')
         time.sleep(0.5)
+        self.send_command('flift_center')
         self.send_command('blift_center')
-        time.sleep(2)
+        time.sleep(3)
         self.send_command('Go')
         time.sleep(2)
         self.send_command('Stop')
@@ -89,10 +119,20 @@ class DirectionController(Node):
 
     def Go_and_Right(self):
         self.send_command('Go')
-        time.sleep(2)
+        time.sleep(4)
         self.send_command('Stop')
         time.sleep(1)
         self.turn_right_mode()
+        
+    def Go(self):
+        self.send_command('Go')
+        time.sleep(8)
+        
+    def ROBOT_ARM_HOME(self):
+        self.send_command('go_home')
+    
+    def ROBOT_ARM_HOME_MODE3(self):
+        self.send_command('mission_3_basic_state')
         
     def Go_Straight(self):    
         if self.IMU_Flag == True and self.roll == 0:
@@ -141,8 +181,12 @@ class DirectionController(Node):
         
         if self.yaw >= 0 and self.Straight_end_flag == False:
             self.Straight_end_flag = True
+            self.Stair_count += 1
+            
+        if self.Stair_count > 5:
+           self.Stair_end_flag == True     
         
-        return self.Straight_end_flag
+        return self.Stair_end_flag
         
     def Go_to_Stairs(self):
         start_time = time.time()  # 시작 시간 기록
@@ -195,7 +239,7 @@ class DirectionController(Node):
         while True:
                 # 경과 시간 체크
             elapsed = time.time() - start_time
-            if elapsed > 30:  # 10초 넘으면 강제 종료
+            if elapsed > 10:  # 10초 넘으면 강제 종료
                 print("Timeout! Exit loop.")
                 break
             
@@ -209,8 +253,9 @@ class DirectionController(Node):
             if -5 <= X <= 5:
                 self.send_command('Go_auto')
                 time.sleep(1)
-                break
                 print("X in range, go straight.")
+                break
+                
             elif X < -40:
                 self.send_command('Left_auto')
                 print("X < -10, turn left fast.")
@@ -233,15 +278,14 @@ class DirectionController(Node):
         self.send_command('LED_OFF')
     
             
-
-    def Go_to_door(self, goal_x, goal_y):
+    def Go_to_door(self):
         start_time = time.time()  # 시작 시간 기록
         print(self.from_center_x)
         X = None
         while True:
                 # 경과 시간 체크
             elapsed = time.time() - start_time
-            if elapsed > 30:  # 10초 넘으면 강제 종료
+            if elapsed > 20:  # 10초 넘으면 강제 종료
                 print("Timeout! Exit loop.")
                 break
             
@@ -255,8 +299,9 @@ class DirectionController(Node):
             if -5 <= X <= 5:
                 self.send_command('Go_auto')
                 time.sleep(1)
-                break
                 print("X in range, go straight.")
+                break
+                
             elif X < -40:
                 self.send_command('Left_auto')
                 print("X < -10, turn left fast.")
@@ -280,10 +325,19 @@ class DirectionController(Node):
         time.sleep(1)
         self.send_command('LED_OFF')
         
-        
-    def box_mode(self):
+    def Press_door(self):
+        self.send_command('Stop')
+        time.sleep(1)
+        self.arm_service('open_door')
         self.send_command('Go')
-        time.sleep(2)
+        time.sleep(5)
+        self.send_command('Stop')
+        time.sleep(1)
+    
+    def box_mode(self):
+        self.send_command('Stop')
+        time.sleep(1)
+        self.arm_service('pick')
         self.send_command('Stop')
         time.sleep(1)
 
@@ -293,23 +347,24 @@ class DirectionController(Node):
         self.send_command('Stop')
         time.sleep(1)
 
-    def brick_mode(self):
-        self.send_command('Go')
-        time.sleep(10)
-        self.send_command('Stop')
-        time.sleep(1)
+    # def brick_mode(self):
+    #     self.send_command('Go')
+    #     time.sleep(10)
+    #     self.send_command('Stop')
+    #     time.sleep(1)
 
     def Press_LED_mode(self):
         self.send_command('Stop')
         time.sleep(1)
-
+        self.arm_service('press_button')
+        
     def fire_search_mode(self):
         self.send_command('LED_ON')
         self.send_command('Go')
         time.sleep(3)
         self.send_command('Stop')
         time.sleep(1)
-        self.send_command('Robot_arm_search')
+        self.send_command('see_around')
         time.sleep(12)
         self.send_command('LED_OFF')
 

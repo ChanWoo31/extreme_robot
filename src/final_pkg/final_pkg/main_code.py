@@ -172,6 +172,10 @@ class ModeController(Node):
         
     def mode_4_action(self):
         self.get_logger().info(f"Mode 4: yaw={self.current_yaw:.2f}, obstacle={self.obstacle_detected}")
+        if self.init_4_flag == True:
+            self.direction_ctrl.ROBOT_ARM_HOME_MODE3()
+            self.init_4_flag = False
+            
         if self.camera_detected == 'ebox':
             self.auto_drive_flag_mode4 == False
             self.direction_ctrl.Go_to_Box()

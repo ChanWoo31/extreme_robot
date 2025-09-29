@@ -74,6 +74,8 @@ class UnifiedArmController(Node):
         self.x_lift_up_tick = self.declare_parameter('x_lift_up_tick', 5461).get_parameter_value().integer_value
         self.x_lift_center_tick = self.declare_parameter('x_lift_center_tick', 2048).get_parameter_value().integer_value
         self.x_lift_down_tick = self.declare_parameter('x_lift_down_tick', -1365).get_parameter_value().integer_value
+        self.x_lift_up_tick_little = self.declare_parameter('x_lift_up_tick_little', 3755).get_parameter_value().integer_value
+        self.x_lift_down_tick_little = self.declare_parameter('x_lift_down_tick_little', 0).get_parameter_value().integer_value
 
         self.xl_back_id  = self.declare_parameter('xl_back_id', 7).get_parameter_value().integer_value
         self.back_up_tick     = self.declare_parameter('back_up_tick',    -2560).get_parameter_value().integer_value
@@ -248,10 +250,13 @@ class UnifiedArmController(Node):
         if c == 'flift_up':    self.packet_x.write4ByteTxRx(self.port, self.x_lift_id, self.ADDR_GOAL_POSITION, int(self.x_lift_up_tick)); return
         if c == 'flift_center':self.packet_x.write4ByteTxRx(self.port, self.x_lift_id, self.ADDR_GOAL_POSITION, int(self.x_lift_center_tick)); return
         if c == 'flift_down':  self.packet_x.write4ByteTxRx(self.port, self.x_lift_id, self.ADDR_GOAL_POSITION, int(self.x_lift_down_tick)); return
+        if c == 'flift_up_little':    self.packet_x.write4ByteTxRx(self.port, self.x_lift_id, self.ADDR_GOAL_POSITION, int(self.x_lift_up_tick_little)); return
+        if c == 'flift_down_little':  self.packet_x.write4ByteTxRx(self.port, self.x_lift_id, self.ADDR_GOAL_POSITION, int(self.x_lift_down_tick_little)); return
 
         if c == 'blift_up':    self.packet_x.write4ByteTxRx(self.port, self.xl_back_id, self.ADDR_GOAL_POSITION, int(self.back_up_tick)); return
         if c == 'blift_center':self.packet_x.write4ByteTxRx(self.port, self.xl_back_id, self.ADDR_GOAL_POSITION, int(self.back_center_tick)); return
         if c == 'blift_down':  self.packet_x.write4ByteTxRx(self.port, self.xl_back_id, self.ADDR_GOAL_POSITION, int(self.back_down_tick)); return
+        if c == 'blift_down_45':  self.packet_x.write4ByteTxRx(self.port, self.xl_back_id, self.ADDR_GOAL_POSITION, int(self.back_down_45_tick)); return
 
         # 그리퍼
         if c == 'open':        self.packet_ax.write2ByteTxRx(self.port, self.ax_grip_id, self.AX_ADDR_GOAL_POSITION, int(self.grip_open_tick)); return
@@ -309,6 +314,9 @@ class UnifiedArmController(Node):
             ok = True
         elif task == 'mission_3_basic_state':
             ok = self.mission_3_basic_state()
+        # 이게 미션4에서 왼쪽 보고 가는 동작
+        elif task == 'mission_4_basic_state':
+            ok = self.mission_4_basic_state()
         elif task == 'press_button':
             self.get_logger().warn("press_button_seq function not implemented")
             ok = False
@@ -864,12 +872,24 @@ class UnifiedArmController(Node):
 
     def place_seq(self, p):
         """박스 place 시퀀스"""
+        """
+        J1: 512 -> 820
+        J2: 2048 -> 20
+        J3: 2048 -> 354
+        """
         self.get_logger().info("박스 place 시퀀스 시작")
         self.go_home_ticks()
         time.sleep(1.0)
-        self.move_xl_only(offset_j2=-415, offset_j3=-670)
-        time.sleep(1.0)
+        self.move_from_home_ticks(offset_j1=308)
+        time.sleep(3.0)
+        self.move_xl_only(offset_j2=-2028, offset_j3=-1694)
+        time.sleep(2.0)
         self.gripper(False)
+        time.sleep(2.0)
+        self.move_xl_only(offset_j2=0, offset_j3=0)
+        time.sleep(2.0)
+        self.go_home_ticks()
+        time.sleep(1.0)
         self.get_logger().info("박스 place 시퀀스 완료")
         return True
 
@@ -883,19 +903,30 @@ class UnifiedArmController(Node):
 
         self.get_logger().info("Mission 3 basic state ready")
         return True
+    
+    def mission_4_basic_state(self):
+        """미션3 기본 상태"""
+        self.get_logger().info("Moving to Mission 3 basic state")
 
-    # def mission_3_state_after_pressing_button(self):
-    #     """안전한 높은 위치로 이동"""
-    #     safe_ticks = [0, -4057, 3953, -268]
+        if not self.move_to_4_position():
+            self.get_logger().error("Failed to move to safe position")
+            return False
 
-    #     try:
-    #         self.move_from_home_ticks(offset_j1=safe_ticks[0], offset_j2=safe_ticks[1], offset_j3=safe_ticks[2], offset_j4=safe_ticks[3])
-    #         time.sleep(5.0)
-    #         self.get_logger().info("Moved to safe position")
-    #         return True
-    #     except Exception as e:
-    #         self.get_logger().error(f"Failed to move to safe position: {e}")
-    #         return False
+        self.get_logger().info("Mission 3 basic state ready")
+        return True
+
+    def move_to_4_position(self):
+        """안전한 높은 위치로 이동"""
+        safe_ticks = [308, -4057, 3953, -268]
+
+        try:
+            self.move_from_home_ticks(offset_j1=safe_ticks[0], offset_j2=safe_ticks[1], offset_j3=safe_ticks[2], offset_j4=safe_ticks[3])
+            time.sleep(5.0)
+            self.get_logger().info("Moved to safe position")
+            return True
+        except Exception as e:
+            self.get_logger().error(f"Failed to move to safe position: {e}")
+            return False
 
     def _run_pick_once(self, x, y, z):
         """비동기 픽 실행 함수"""

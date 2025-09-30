@@ -26,42 +26,50 @@ class WallFollower(Node):
         self.yaw_flag_start_time = time.time()
         self.force_yaw_flag = False
         self.force_yaw_start_time = 0.0
+        self.yaw_flag = True
+
+        self.offset_lock_time = 0.0
+        self.offset_lock_duration = 3.0
 
     def pointcloud_callback(self, msg):
         points = np.array([[p[0], p[1], p[2]] for p in pc2.read_points(msg, skip_nans=True)])
         if len(points) == 0:
             return
 
-        points[:,2] += self.lidar_height
-        x, y, z = points[:,0], points[:,1], points[:,2]
-
-        # ------------------ 전방 장애물 감지 ------------------
+        # 좌표 전처리
+        points[:, 2] += self.lidar_height
+        x, y, z = points[:, 0], points[:, 1], points[:, 2]
         angles = np.degrees(np.arctan2(y, x))
-        forward_mask = (x > 0) & (x < 1.2) & (z <= 0.15) & (z >= 0.03) & (np.abs(angles) <= 3)
-        obstacle_points = points[forward_mask]
-        obstacle_detected = len(obstacle_points) > 4
-        self.obstacle_pub.publish(Bool(data=obstacle_detected))
 
-        # ------------------ 전방 벽 감지 및 Y offset 조정 ------------------
-        front_mask = (np.abs(z - 0.35) < 0.05) & (np.linalg.norm(points[:, :2], axis=1) <= 1.5)
+        # ------------------ 벽 후보 계산 ------------------
+        # 전방 벽 감지로 offset_y 조정
+        front_mask_h = (np.abs(z - 0.35) < 0.05) & (np.linalg.norm(points[:, :2], axis=1) <= 3.0)
         front_angles = np.degrees(np.arctan2(y, x))
-        front_mask = front_mask & (np.abs(front_angles) <= 5)
+        front_mask = front_mask_h & (np.abs(front_angles) <= 5)
         front_wall_points = points[front_mask]
-        self.offset_y = 1.5 if len(front_wall_points) >= 20 else 0.6
+        # pointcloud_callback 안의 offset_y 결정 부분 교체
+        if len(front_wall_points) >= 20:
+            self.offset_y = 1.5
+            self.offset_lock_time = time.time()  # 유지 시작
+        else:
+            # 아직 3초 안 지났으면 그대로 유지
+            if abs(time.time()  - self.offset_lock_time )< self.offset_lock_duration:
+                self.offset_y = 1.5
+            else:
+                self.offset_y = 0.6
 
-        # ------------------ 전체 벽 후보 ------------------
+        # 전체 벽 후보
         wall_mask = (np.abs(z - 0.35) < 0.05) & (x > 0)
         wall_points = points[wall_mask]
-        wall_2d = wall_points[:, :2]
+        wall_2d = wall_points[:, :2] if len(wall_points) > 0 else np.empty((0, 2))
 
         target = None
         yaw_deg = None
         right_wall_points = []
 
         # ------------------ 오른쪽 벽 인식 ------------------
-        if len(wall_2d) > 5:
-            angles_2d = np.degrees(np.arctan2(wall_2d[:,1], wall_2d[:,0]))
-            # right_mask = (angles_2d <= -20) & (angles_2d >= -30)
+        if len(wall_2d) > 0:
+            angles_2d = np.degrees(np.arctan2(wall_2d[:, 1], wall_2d[:, 0]))
             right_mask = (angles_2d <= -30) & (angles_2d >= -45)
             right_candidates = wall_2d[right_mask]
 
@@ -70,7 +78,7 @@ class WallFollower(Node):
                 labels = clustering.labels_
                 unique_labels = set(labels)
                 max_count = 0
-                main_cluster_points = np.array([])
+                main_cluster_points = np.empty((0, 2))
 
                 for lbl in unique_labels:
                     if lbl == -1:
@@ -81,28 +89,33 @@ class WallFollower(Node):
                         main_cluster_points = cluster_pts
 
                 if max_count > 10:
-                    X = main_cluster_points[:,0].reshape(-1,1)
-                    Y = main_cluster_points[:,1]
+                    X = main_cluster_points[:, 0].reshape(-1, 1)
+                    Y = main_cluster_points[:, 1]
                     reg = LinearRegression().fit(X, Y)
                     m, b = reg.coef_[0], reg.intercept_
 
                     line_thresh = 0.05
-                    dist_to_line = np.abs(Y - (m*X.flatten() + b))
+                    dist_to_line = np.abs(Y - (m * X.flatten() + b))
                     mask_line = dist_to_line < line_thresh
                     right_wall_points = main_cluster_points[mask_line]
 
-            # ------------------ 목표점 및 YAW 계산 ------------------
-            if len(right_wall_points) > 0:
-                x_target = np.max(right_wall_points[:,0])
+            # 목표점 및 YAW 계산
+            if len(right_wall_points) > 3 and self.yaw_flag == True:
+                x_target = np.max(right_wall_points[:, 0])
                 y_target = m * x_target + b + self.offset_y
                 z_target = 0.35
                 target = np.array([x_target, y_target, z_target])
                 yaw = math.atan2(y_target, x_target)
                 yaw_deg = math.degrees(yaw)
             else:
+                print("Not enough right wall points or yaw_flag is False")
+                if self.yaw_flag == True:
+                    self.emergency_timer = time.time()  
+                    self.yaw_flag = False
+
                 if len(wall_2d) > 0:
-                    front_mask = (angles_2d >= -30) & (angles_2d <= 30)
-                    front_wall_2d = wall_2d[front_mask] if len(wall_2d[front_mask]) > 0 else wall_2d
+                    front_mask2 = (angles_2d >= -30) & (angles_2d <= 30)
+                    front_wall_2d = wall_2d[front_mask2] if np.any(front_mask2) else wall_2d
                     dists = np.linalg.norm(front_wall_2d, axis=1)
                     idx = np.argmax(dists)
                     x_target, y_target = front_wall_2d[idx]
@@ -111,10 +124,31 @@ class WallFollower(Node):
                     yaw = math.atan2(y_target, x_target)
                     yaw_deg = math.degrees(yaw)
 
+                if abs(time.time() - self.emergency_timer) > 3.0:
+                    self.yaw_flag = True
+
+        # ------------------ 전방 장애물 감지 (벽 XY 제외) ------------------
+        forward_mask = (x > 0) & (x < 1.2) & (z <= 0.15) & (z >= 0.03) & (np.abs(angles) <= 3)
+        obstacle_points = points[forward_mask]
+
+        # ---- 벽(XY)와 유사한 장애물 점 제거 (거리 기반) ----
+        if len(obstacle_points) > 0 and len(wall_2d) > 0:
+            obs_xy = obstacle_points[:, :2]           # (No, 2)
+            wall_xy = wall_2d                         # (Nw, 2)
+            tol = 0.07                                # XY 유사성 임계값 [m]
+
+            diff = obs_xy[:, None, :] - wall_xy[None, :, :]     # (No, Nw, 2)
+            d2 = np.sum(diff * diff, axis=2)                    # (No, Nw)
+            dmin = np.sqrt(np.min(d2, axis=1))                  # (No,)
+            keep_mask = dmin > tol
+            obstacle_points = obstacle_points[keep_mask]
+
+        obstacle_detected = len(obstacle_points) > 4
+        self.obstacle_pub.publish(Bool(data=obstacle_detected))
+
         # ------------------ Force Yaw 처리 ------------------
         current_time = time.time()
         if yaw_deg is not None and -10 <= yaw_deg <= 10:
-            # 정상 yaw 들어오면 force 종료
             self.force_yaw_flag = False
             self.yaw_flag_start_time = current_time
         else:
@@ -138,10 +172,11 @@ class WallFollower(Node):
         # ------------------ RViz Marker ------------------
         markers = MarkerArray()
 
-        if obstacle_detected:
+        if obstacle_detected and len(obstacle_points) > 0:
             m = Marker()
             m.header.frame_id = "velodyne"
             m.header.stamp = self.get_clock().now().to_msg()
+
             m.ns = "obstacle"
             m.id = 0
             m.type = Marker.POINTS
@@ -154,6 +189,15 @@ class WallFollower(Node):
             m.color.a = 1.0
             m.points = [Point(x=float(p[0]), y=float(p[1]), z=float(p[2])) for p in obstacle_points]
             markers.markers.append(m)
+        else:
+            # ★ 추가: 장애물 없으면 이전 마커 삭제
+            dm = Marker()
+            dm.header.frame_id = "velodyne"
+            dm.header.stamp = self.get_clock().now().to_msg()
+            dm.ns = "obstacle"
+            dm.id = 0
+            dm.action = Marker.DELETE
+            markers.markers.append(dm)
 
         if len(wall_2d) > 0:
             m = Marker()
@@ -231,7 +275,6 @@ class WallFollower(Node):
 
         self.marker_pub.publish(markers)
         print(f"Obstacle detected: {obstacle_detected}, YAW (deg): {yaw_deg}, Y offset: {self.offset_y}")
-
 
 def main(args=None):
     rclpy.init(args=args)

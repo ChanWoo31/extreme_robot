@@ -45,6 +45,8 @@ class UnifiedArmController(Node):
         # ---------- 매뉴얼 명령 ----------
         self.sub_manual = self.create_subscription(String, '/arm/manual',
                                                    self.on_manual_command, 50)
+        
+        self.color_sub = self.create_subscription(String, '/target_color',self.color_callback,10)
 
         # ---------- 상태 ----------
         self.current_direction = None
@@ -155,6 +157,8 @@ class UnifiedArmController(Node):
         self.init_last_q_from_present()
         self.dt = 0.02
 
+        self.target_color = None  # /target_color 저장용
+
         # 카메라-엔드이펙터 변환 매트릭스
         self.camera_offset = np.array([-0.084, 0.0, 0.04155])
         self.camera_rotation = np.eye(3)
@@ -264,13 +268,13 @@ class UnifiedArmController(Node):
         if c == 'close_fully': self.packet_ax.write2ByteTxRx(self.port, self.ax_grip_id, self.AX_ADDR_GOAL_POSITION, int(self.grip_close_fully_tick)); return
 
         # 조인트 미세조정
-        if c in ('j2_plus','j2_minus','j3_plus','j3_minus','j4_plus','j4_minus'):
-            joint = {'j2':2,'j3':3,'j4':4}[c[:2]]
+        if c in ('j1_plus', 'j1_minus', 'j2_plus','j2_minus','j3_plus','j3_minus','j4_plus','j4_minus'):
+            joint = {'j1':1, 'j2':2,'j3':3,'j4':4}[c[:2]]
             sign  = +1 if c.endswith('plus') else -1
-            self._nudge_joint_deg(joint, 5.0*sign)
+            self._nudge_joint_deg(joint, 10.0*sign)
             return
 
-        if c == 'base_home':
+        if c == 'base_home': 
             self.base_goal = 512
             self.packet_ax.write2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_GOAL_POSITION, 512)
             return
@@ -313,13 +317,10 @@ class UnifiedArmController(Node):
             self.enable_auto_mission = False
             ok = True
         elif task == 'mission_3_basic_state':
-            ok = self.mission_3_basic_state()
+            ok = self.mission_3_basic_state_seq()
         # 이게 미션4에서 왼쪽 보고 가는 동작
         elif task == 'mission_4_basic_state':
             ok = self.mission_4_basic_state()
-        elif task == 'press_button':
-            self.get_logger().warn("press_button_seq function not implemented")
-            ok = False
         elif task == 'open_door': ok = self.open_door()
         elif task == 'place': ok = self.place_seq([x, y, z])
         elif task == 'move': self.move_ik(x, y, z); ok = True
@@ -793,6 +794,18 @@ class UnifiedArmController(Node):
         self.get_logger().warn(f"Failed to align with ebox after {attempts} attempts or {timeout}s timeout")
         return False
 
+    def color_callback(self, msg: String):
+        c = msg.data.strip().lower()
+        if c in ('blue', 'green', 'orange'):
+            self.target_color = c
+            self.get_logger().info(f"Target color = {c}")
+        elif c in ('', 'stop', 'none'):
+            self.target_color = None
+            self.get_logger().info("Target color cleared")
+        else:
+            self.get_logger().warn(f"Unknown target_color: {c}")
+
+
     def move_to_safe_position(self):
         """안전한 높은 위치로 이동"""
         safe_ticks = [-308, -4057, 3953, -268]
@@ -852,15 +865,27 @@ class UnifiedArmController(Node):
     def open_door(self):
         self.gripper_fully(True)
 
-        press_near_1_ticks = [-4774, 3236, 1791]
-        push_ticks = [-4888, 1823, 2413]
+        press_near_1_ticks = [0,-4774, 3236, 1791]
+        press_near_1_left_ticks = [308,-4774, 3236, 1791]
+        push_ticks = [-4888, 1823, 2413] 
 
         try:
-            self.move_xl_only(offset_j2=press_near_1_ticks[0], offset_j3=press_near_1_ticks[1], offset_j4=press_near_1_ticks[2])
+            self.move_from_home_ticks(offset_j1=press_near_1_ticks[0], offset_j2=press_near_1_ticks[1], offset_j3=press_near_1_ticks[2], offset_j4=press_near_1_ticks[3])
             time.sleep(4.0)
 
             self.move_xl_only(offset_j2=push_ticks[0], offset_j3=push_ticks[1], offset_j4=push_ticks[2])
             time.sleep(2.0)
+
+            self.move_from_home_ticks(offset_j1=press_near_1_left_ticks[0], offset_j2=press_near_1_left_ticks[1], offset_j3=press_near_1_left_ticks[2], offset_j4=press_near_1_left_ticks[3])
+            time.sleep(2.0)
+            
+            self.move_xl_only(offset_j2=push_ticks[0], offset_j3=push_ticks[1], offset_j4=push_ticks[2])
+            time.sleep(2.0)
+            # self.move_xl_only(offset_j2=press_near_1_ticks[0], offset_j3=press_near_1_ticks[1], offset_j4=press_near_1_ticks[2])
+            # time.sleep(4.0)
+
+            # self.move_xl_only(offset_j2=push_ticks[0], offset_j3=push_ticks[1], offset_j4=push_ticks[2])
+            # time.sleep(2.0)
 
 
             self.get_logger().info("LED button pressed successfully")
@@ -893,7 +918,7 @@ class UnifiedArmController(Node):
         self.get_logger().info("박스 place 시퀀스 완료")
         return True
 
-    def mission_3_basic_state(self):
+    def mission_3_basic_state_seq(self):
         """미션3 기본 상태"""
         self.get_logger().info("Moving to Mission 3 basic state")
 

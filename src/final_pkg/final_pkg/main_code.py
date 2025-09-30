@@ -2,18 +2,14 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int32, Float32, Bool, String
-import sys
-import json
-
-sys.path.append('/home/lee/robot_ws/src/auto_drive_code.py')  
-from auto_drive_code import DirectionController
+from final_pkg.auto_drive_code import DirectionController
 
 class ModeController(Node):
     def __init__(self):
         super().__init__('mode_controller')
 
         # 현재 모드 저장
-        self.current_mode = 1
+        self.current_mode = 4
 
         # 최신 yaw와 장애물 상태 저장
         self.current_yaw = 0.0
@@ -21,7 +17,9 @@ class ModeController(Node):
         self.camera_detected = ' '
         self.color_direction = None
         self.selected_color = None
-        
+        self.from_center_x = 0.0
+        self.from_center_y = 0.0
+
         self.direction_ctrl = DirectionController()
         
         self.init_1_flag = True
@@ -33,18 +31,20 @@ class ModeController(Node):
         self.auto_drive_flag_mode2 = True
         self.auto_drive_flag_mode3 = True
         self.auto_drive_flag_mode4 = True
-        
+
         self.fire_search_flag = True
         self.Go_to_stairs_flag = True
-        
+
         self.Press_button_flag = False
-        
-        # ------------------ Subscriber ------------------
+        self.box_mode_executed = False
         self.sub_mode = self.create_subscription(Int32, '/current_mode', self.mode_callback, 10)
+
+        # ------------------ Subscriber ------------------
         self.sub_yaw = self.create_subscription(Float32, '/yaw_value', self.yaw_callback, 10)
         self.sub_obstacle = self.create_subscription(Bool, '/obstacle_detected', self.obstacle_callback, 10)
         self.sub_obstacle_name = self.create_subscription(String, '/detected_object_names', self.camera_name_callback, 10)
-        self.sub_obstacle_name = self.create_subscription(String, '/detected_objects', self.camera_data_callback, 10)
+        self.sub_from_center_x = self.create_subscription(Float32, '/from_center_x', self.from_center_x_callback, 10)
+        self.sub_from_center_y = self.create_subscription(Float32, '/from_center_y', self.from_center_y_callback, 10)
         self.sub_color_direction = self.create_subscription(String, '/direction', self.camera_color_direction_callback, 10)
 
         # 추가: 색상 선택 구독
@@ -71,10 +71,11 @@ class ModeController(Node):
     def camera_name_callback(self, msg: String):
         self.camera_detected = msg.data
         
-    def camera_data_callback(self, msg: String):
-        self.camera_data = json.loads(msg.data)
-        self.from_center_x = float(self.camera_data["from_center_x"])
-        self.from_center_y = float(self.camera_data["from_center_y"])
+    def from_center_x_callback(self, msg: Float32):
+        self.from_center_x = msg.data
+
+    def from_center_y_callback(self, msg: Float32):
+        self.from_center_y = msg.data
         
     def camera_color_direction_callback(self, msg: String):
         self.color_direction = msg.data
@@ -87,6 +88,7 @@ class ModeController(Node):
     def execute_mode(self):
         if self.current_mode == 1:
             self.mode_1_action()
+            
         elif self.current_mode == 2:
             self.mode_2_action()
         elif self.current_mode == 3:
@@ -104,7 +106,7 @@ class ModeController(Node):
             self.init_1_flag = False
         
         self.direction_ctrl.direction_control(self.current_yaw)
-        
+        # self.direction_ctrl.GO_SHOOT()
         if self.obstacle_detected:
             self.direction_ctrl.obstacle_mode()
             self.obstacle_detected = False
@@ -160,27 +162,38 @@ class ModeController(Node):
         
         if self.color_direction and self.Press_button_flag == False:
             self.direction_ctrl.Press_LED_mode()
-            self.Press_button_flag == True
+            self.Press_button_flag = True
             
         if self.camera_detected == 'door':
-            self.auto_drive_flag_mode3 == False
+            self.auto_drive_flag_mode3 = False
             self.direction_ctrl.Go_to_door()
             self.direction_ctrl.Press_door()
-            
+
         else:
-            self.auto_drive_flag_mode3 == True
+            self.auto_drive_flag_mode3 = True
         
     def mode_4_action(self):
-        self.get_logger().info(f"Mode 4: yaw={self.current_yaw:.2f}, obstacle={self.obstacle_detected}")
+        self.get_logger().info(f"Mode 4: camera={self.camera_detected}, box_executed={self.box_mode_executed}")
         if self.init_4_flag == True:
-            self.direction_ctrl.ROBOT_ARM_HOME_MODE3()
+            # self.direction_ctrl.ROBOT_ARM_HOME_MODE4()
             self.init_4_flag = False
-            
-        if self.camera_detected == 'ebox':
-            self.auto_drive_flag_mode4 == False
+
+        # box_mode가 이미 실행되었으면 더 이상 실행하지 않음
+        if self.box_mode_executed:
+            if self.auto_drive_flag_mode4:
+                self.direction_ctrl.direction_control(self.current_yaw)
+            return  # box_mode 이미 완료, 더 이상 체크 안 함
+
+        # box_mode가 아직 실행 안 됐고, ebox 감지되면 실행
+        if self.camera_detected == 'ebox' and not self.box_mode_executed:
+            self.get_logger().warn("Starting box_mode sequence...")
+            self.auto_drive_flag_mode4 = False
             self.direction_ctrl.Go_to_Box()
             self.direction_ctrl.box_mode()
-            self.auto_drive_flag_mode4 == True
+            self.box_mode_executed = True  # 플래그 설정
+            self.get_logger().warn("Box_mode completed! Will never execute again.")
+            self.auto_drive_flag_mode4 = True
+            return
 
         if self.auto_drive_flag_mode4:
             self.direction_ctrl.direction_control(self.current_yaw)

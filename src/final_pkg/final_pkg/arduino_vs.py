@@ -41,6 +41,7 @@ class ArduinoNode(Node):
         # 자율주행 명령은 모드가 1~4일 때만 사용
         if self.mode != 5:
             self.latest_cmd = msg.data
+            print(f"Received command: {self.latest_cmd}")
 
     def update(self):
         # 1. 아두이노로 명령 전송 (자율주행 모드일 때만)
@@ -58,18 +59,20 @@ class ArduinoNode(Node):
                 # [RX] 접두사 제거
                 if line.startswith("[RX] "):
                     line = line[5:]
-
+                    print(line)
+                
+                print(line)
                 # Mode 변경 신호라면 업데이트 + 퍼블리시
                 if line.startswith("Mode"):
+                    print("SSSSSSSSS")
                     try:
                         new_mode = int(line[-1])  # "Mode5" → 5
-                        if new_mode != self.mode:
-                            self.mode = new_mode
-                            self.get_logger().info(f"Mode changed to: {self.mode}")
-                            # 모드 퍼블리시
-                            mode_msg = Int32()
-                            mode_msg.data = self.mode
-                            self.pub_mode.publish(mode_msg)
+                        self.mode = new_mode
+                        self.get_logger().info(f"Mode changed to: {self.mode}")
+                        # 모드 퍼블리시
+                        mode_msg = Int32()
+                        mode_msg.data = self.mode
+                        self.pub_mode.publish(mode_msg)
                     except ValueError:
                         self.get_logger().warn(f"Invalid mode string: {line}")
                     continue
@@ -80,10 +83,29 @@ class ArduinoNode(Node):
                     msg.data = line
                     self.pub_remote.publish(msg)
                     self.get_logger().info(f"Published (Remote mode): {line}")
+                    print("5555")
+            
+        mode_msg = Int32()
+        mode_msg.data = self.mode
+        self.pub_mode.publish(mode_msg)
+        print(self.mode)
 
 def main(args=None):
     rclpy.init(args=args)
-    node = ArduinoNode(serial_port='/dev/ttyARDUINO', baudrate=115200)
+    # 일반적인 아두이노 포트들을 순서대로 시도
+    possible_ports = ['/dev/ttyACM0', '/dev/ttyARDUINO', '/dev/ttyUSB0', '/dev/ttyUSB1']
+
+    for port in possible_ports:
+        try:
+            node = ArduinoNode(serial_port=port, baudrate=115200)
+            print(f"Successfully connected to {port}")
+            break
+        except:
+            print(f"Failed to connect to {port}, trying next port...")
+            continue
+    else:
+        print("No available serial ports found!")
+        return
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

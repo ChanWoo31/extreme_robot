@@ -40,10 +40,10 @@ class UnifiedArmController(Node):
         self.detected_sub = self.create_subscription(DetectedObject, 'detected_objects',
                                                      self.handle_detected_object, qos_sensor)
         self.direction_subscriber = self.create_subscription(String, '/direction',
-                                                             self.direction_callback, qos_sensor)
+                                                             self.direction_callback, 10)
 
         # ---------- 매뉴얼 명령 ----------
-        self.sub_manual = self.create_subscription(String, '/arm/manual',
+        self.sub_manual = self.create_subscription(String, '/direction_cmd',
                                                    self.on_manual_command, 50)
 
         # ---------- 상태 ----------
@@ -125,7 +125,7 @@ class UnifiedArmController(Node):
             self.packet_x.write4ByteTxRx(self.port, x_id, self.ADDR_PROFILE_ACCEL, 20 if x_id in [self.x_lift_id, self.xl_back_id] else 10)
             self.packet_x.write4ByteTxRx(self.port, x_id, self.ADDR_PROFILE_VELOCITY, 100)
             if x_id in self.ids_x:
-                self.packet_x.write2ByteTxRx(self.port, x_id, self.ADDR_CURRENT_LIMIT, 300)
+                self.packet_x.write2ByteTxRx(self.port, x_id, self.ADDR_CURRENT_LIMIT, 500)
             self.packet_x.write1ByteTxRx(self.port, x_id, self.ADDR_TORQUE_ENABLE, self.TORQUE_ENABLE)
 
         self.sync_write = GroupSyncWrite(self.port, self.packet_x, self.ADDR_GOAL_POSITION, 4)
@@ -263,11 +263,14 @@ class UnifiedArmController(Node):
         if c == 'close':       self.packet_ax.write2ByteTxRx(self.port, self.ax_grip_id, self.AX_ADDR_GOAL_POSITION, int(self.grip_close_tick)); return
         if c == 'close_fully': self.packet_ax.write2ByteTxRx(self.port, self.ax_grip_id, self.AX_ADDR_GOAL_POSITION, int(self.grip_close_fully_tick)); return
 
+        if c == 'place': self.place_seq([0.2, 0.0, 0.1]); return
+        if c == 'pick': self._run_pick_once(0.2, 0.0, 0.0); return
+        if c == 'right_up': self.move_to_safe_position(); return
         # 조인트 미세조정
-        if c in ('j2_plus','j2_minus','j3_plus','j3_minus','j4_plus','j4_minus'):
-            joint = {'j2':2,'j3':3,'j4':4}[c[:2]]
+        if c in ('j1_plus','j1_minus','j2_plus','j2_minus','j3_plus','j3_minus','j4_plus','j4_minus'):
+            joint = {'j1':1,'j2':2,'j3':3,'j4':4}[c[:2]]
             sign  = +1 if c.endswith('plus') else -1
-            self._nudge_joint_deg(joint, 5.0*sign)
+            self._nudge_joint_deg(joint, 10.0*sign)
             return
 
         if c == 'base_home':
@@ -328,6 +331,7 @@ class UnifiedArmController(Node):
         elif task == 'go_ik_ready': self.go_ik_ready_position(); ok = True
         elif task == 'see_around': self.ax_see_around(); ok = True
         elif task == 'see_around_90': self.ax_see_around_90(); ok = True
+        elif task == 'see_person': self.see_person_seq(); ok = True
         elif task == 'led_button_press':
             with self.state_lock:
                 if self.active_task is not None:
@@ -657,30 +661,51 @@ class UnifiedArmController(Node):
         self.go_home_ticks()
         self.get_logger().info("박스 pick 시퀀스 완료")
         return True
+    
+    def see_person_seq(self):
+        self.move_from_home_ticks(offset_j1=438, offset_j2=-3783, offset_j3=3591, offset_j4=1775)
+        self.sleep(10.0)
+        self.go_home_ticks()
+        return True
+
 
     def led_button_press_sequence(self):
         """LED 버튼 누르기 시퀀스"""
         self.get_logger().info("LED button press sequence started")
 
-        self.get_logger().info("Step 1: Color tracking already active, starting alignment...")
+        # 현재 베이스 위치 확인 및 유지
+        current_base_pos, _, _ = self.packet_ax.read2ByteTxRx(self.port, self.ax_base_id, self.AX_ADDR_PRESENT_POS)
+        self.get_logger().info(f"Current base position: {current_base_pos} ticks")
+
+        # base_goal을 현재 위치로 설정 (align에서 이 값 기준으로 회전)
+        self.base_goal = int(current_base_pos)
+        self.get_logger().info(f"Maintaining base at {self.base_goal} ticks for LED button alignment")
+
+        self.get_logger().info("Step 2: Arm already in viewing position from mission_3")
+        time.sleep(1.0)
+
+        self.get_logger().info("Step 3: Color tracking active, starting alignment...")
         self.color_tracking_active = True
 
-        self.get_logger().info("Step 2: Aligning with color target")
+        self.get_logger().info("Step 4: Aligning with color target")
         if not self.align_with_color_target(max_attempts=40, timeout=30.0):
             self.get_logger().error("Failed to align with color target")
             self.color_tracking_active = False
+            self.go_home_ticks()
             return False
 
-        self.get_logger().info("Step 3: Color tracking completed")
+        self.get_logger().info("Step 5: Color tracking completed")
+        # self.go_home_ticks()
 
-        self.get_logger().info("Step 4: Pressing LED button")
+        self.get_logger().info("Step 6: Pressing LED button")
         if not self.press_led_button_ticks():
             self.get_logger().error("Failed to press LED button")
             return False
 
-        self.get_logger().info("Step 5: Returning home")
+        self.get_logger().info("Step 7: Returning home")
         self.go_home_ticks()
-        self.move_xl_only(offset_j2=0, offset_j3=0, offset_j4=3000)
+        time.sleep(2.0)
+        self.move_xl_only(offset_j2=0, offset_j3=0, offset_j4=1500)
         self.get_logger().info("LED button press sequence completed successfully")
         return True
 
@@ -692,10 +717,12 @@ class UnifiedArmController(Node):
         last_direction = None
 
         self.get_logger().info("Starting color-based alignment...")
+        self.get_logger().info(f"Initial current_direction: {self.current_direction}")
 
-        while attempts < max_attempts and (time.time() - start_time) < timeout:
-            if self.current_direction is None:
-                self.get_logger().info("Waiting for color direction...")
+        while (time.time() - start_time) < timeout:
+            self.get_logger().info(f"Attempt {attempts}, current_direction: {self.current_direction}")
+            if self.current_direction is None or self.current_direction == "none":
+                self.get_logger().warn(f"Waiting for color direction... (current_direction={self.current_direction})")
                 time.sleep(0.1)
                 attempts += 1
                 continue
@@ -732,9 +759,8 @@ class UnifiedArmController(Node):
                 self.get_logger().info(f"Rotating base counter-clockwise -{step} ticks (color on right, consecutive: {consecutive_same_direction})")
 
             time.sleep(0.4)
-            attempts += 1
 
-        self.get_logger().warn(f"Failed to align with color after {attempts} attempts or {timeout}s timeout")
+        self.get_logger().warn(f"Failed to align with color after timeout {timeout}s")
         return False
 
     def align_with_ebox_position(self, max_attempts=25, timeout=30.0, threshold=15.0):
@@ -795,7 +821,7 @@ class UnifiedArmController(Node):
 
     def move_to_safe_position(self):
         """안전한 높은 위치로 이동"""
-        safe_ticks = [-308, -4057, 3953, -268]
+        safe_ticks = [-308, -4057, 3953, 0]
 
         try:
             self.move_from_home_ticks(offset_j1=safe_ticks[0], offset_j2=safe_ticks[1], offset_j3=safe_ticks[2], offset_j4=safe_ticks[3])
@@ -824,17 +850,17 @@ class UnifiedArmController(Node):
         press_near_1_ticks = [-4057, 3953, 1232]
         press_near_1_2_ticks = [-4057, 3953, 2400]
         press_near_2_ticks = [-4545, 2953, 3482]
-        push_ticks = [-4545, 2425, 3482]
+        push_ticks = [-4545, 2425, 2800]
 
         try:
             self.move_xl_only(offset_j2=press_near_1_ticks[0], offset_j3=press_near_1_ticks[1], offset_j4=press_near_1_ticks[2])
             time.sleep(4.0)
 
             self.move_xl_only(offset_j2=press_near_1_2_ticks[0], offset_j3=press_near_1_2_ticks[1], offset_j4=press_near_1_2_ticks[2])
-            time.sleep(4.0)
+            time.sleep(2.0)
 
             self.move_xl_only(offset_j2=press_near_2_ticks[0], offset_j3=press_near_2_ticks[1], offset_j4=press_near_2_ticks[2])
-            time.sleep(4.0)
+            time.sleep(2.0)
 
             self.move_xl_only(offset_j2=push_ticks[0], offset_j3=push_ticks[1], offset_j4=push_ticks[2])
             time.sleep(2.0)
@@ -852,15 +878,27 @@ class UnifiedArmController(Node):
     def open_door(self):
         self.gripper_fully(True)
 
-        press_near_1_ticks = [-4774, 3236, 1791]
+        press_near_ticks = [-4774, 3236, 1791]
+        press_near_left_1_ticks = [100, -4774, 3236, 1791]
+        press_near_left_2_ticks = [200, -4774, 3236, 1791]
+        
         push_ticks = [-4888, 1823, 2413]
 
         try:
-            self.move_xl_only(offset_j2=press_near_1_ticks[0], offset_j3=press_near_1_ticks[1], offset_j4=press_near_1_ticks[2])
-            time.sleep(4.0)
-
+            self.move_xl_only(offset_j2=press_near_ticks[0], offset_j3=press_near_ticks[1], offset_j4=press_near_ticks[2])
+            time.sleep(5.0)
             self.move_xl_only(offset_j2=push_ticks[0], offset_j3=push_ticks[1], offset_j4=push_ticks[2])
-            time.sleep(2.0)
+            time.sleep(3.0)
+
+            self.move_from_home_ticks(offset_j1=press_near_left_1_ticks[0], offset_j2=press_near_left_1_ticks[1], offset_j3=press_near_left_1_ticks[2], offset_j4=press_near_left_1_ticks[3])
+            time.sleep(5.0)
+            self.move_xl_only(offset_j2=push_ticks[0], offset_j3=push_ticks[1], offset_j4=push_ticks[2])
+            time.sleep(3.0)
+
+            self.move_from_home_ticks(offset_j1=press_near_left_2_ticks[0], offset_j2=press_near_left_2_ticks[1], offset_j3=press_near_left_2_ticks[2], offset_j4=press_near_left_2_ticks[3])
+            time.sleep(5.0)
+            self.move_xl_only(offset_j2=push_ticks[0], offset_j3=push_ticks[1], offset_j4=push_ticks[2])
+            time.sleep(3.0)
 
 
             self.get_logger().info("LED button pressed successfully")

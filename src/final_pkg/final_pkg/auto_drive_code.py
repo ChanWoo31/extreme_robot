@@ -24,15 +24,23 @@ class DirectionController(Node):
         # 퍼블리셔
         self.pub_direction = self.create_publisher(String, pub_direction_topic, 10)
         self.subscription = self.create_subscription(Float32MultiArray, 'ebimu_rpy', self.rpy_callback, 10)
-        self.sub_color_direction = self.create_subscription(
-            String,
+        # self.sub_color_direction = self.create_subscription(
+        #     DetectedObject,
+        #     '/detected_objects',
+        #     self.camera_data_callback,
+        #     10
+        # )
+
+        self.sub_detected = self.create_subscription(
+            DetectedObject,
             '/detected_objects',
-            self.camera_data_callback,
+            self.detected_callback,
             10
         )
         
-        self.arm_service_shoot = self.create_client(ArmDoTask, '/ArmDoTask')
-        while not self.arm_service_shoot.wait_for_service(timeout_sec=1.0):
+        # self.arm_service_client = self.create_client(ArmDoTask, '/ArmDoTask')
+        self.arm_service_client = self.create_client(ArmDoTask, 'arm_do_task')
+        while not self.arm_service_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('Arm service not available, waiting...')
         self.get_logger().info('Arm service connected!')
 
@@ -47,17 +55,39 @@ class DirectionController(Node):
         self.Stair_count = 0
         self.Stair_end_flag = False
 
-    def arm_service(self, task):
-        request = ArmDoTask.Request()
-        request.task = task
-        
-        future = self.arm_service_shoot.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=1.0)
-        response = future.result()
-        if response.success:
-            self.get_logger().info("앙 되노")
-        else:   
-            self.get_logger().info("앙 안되노")
+        self.Go_SHOOT_flag = True
+
+        self.camera_data = None
+
+    def detected_callback(self, msg: DetectedObject):
+        self.from_center_x = float(msg.distance_from_center_x)
+        self.from_center_y = float(msg.distance_from_center_y)
+
+    def arm_service(self, task, timeout=25.0) -> bool:
+        """task를 ArmDoTask 서비스에 요청 후 성공 여부 반환, timeout 초까지 반복"""
+        start_time = time.time()
+        while True:
+            try:
+                req = ArmDoTask.Request()
+                req.task = task
+                future = self.arm_service_client.call_async(req)
+                rclpy.spin_until_future_complete(self, future, timeout_sec=1.0)
+
+                if future.done():
+                    response = future.result()
+                    if response is not None and response.success:
+                        self.get_logger().info(f"Arm task '{task}' 성공")
+                        return True
+                    else:
+                        self.get_logger().warn(f"Arm task '{task}' 실패, 재시도 중...")
+            except Exception as e:
+                self.get_logger().error(f"Arm task '{task}' 서비스 호출 실패: {e}")
+
+            if time.time() - start_time > timeout:
+                self.get_logger().error(f"Arm task '{task}' 요청 {timeout}초 안에 완료되지 않음 (타임아웃)")
+                return False
+            time.sleep(0.1)  
+            
     # ------------------- 명령 발행 -------------------
     def send_command(self, command: str):
         msg = String()
@@ -73,7 +103,7 @@ class DirectionController(Node):
         self.pitch = self.pitch % 360
         self.yaw = self.yaw 
     
-    def camera_data_callback(self, msg: String):
+    def camera_data_callback(self, msg: DetectedObject):
         self.camera_data = json.loads(msg.data)
         self.from_center_x = float(self.camera_data["from_center_x"])
         self.from_center_y = float(self.camera_data["from_center_y"])
@@ -101,7 +131,7 @@ class DirectionController(Node):
         time.sleep(3)
         self.send_command('Stop')
         time.sleep(0.5)
-        self.send_command('flift_down')
+        self.send_command('flift_down_little')
         time.sleep(3)
         self.send_command('blift_down')
         time.sleep(4)
@@ -117,9 +147,21 @@ class DirectionController(Node):
         self.send_command('Stop')
         time.sleep(1)
 
+    def GO_SHOOT(self):
+        self.send_command('Stop')
+        time.sleep(1)
+        self.send_command('ROVER')
+        time.sleep(0.5)
+        self.send_command('flift_up_little')
+        time.sleep(3)
+        self.send_command('Go')
+        time.sleep(5)
+        self.send_command('flift_center')
+        time.sleep(3)
+
     def Go_and_Right(self):
         self.send_command('Go')
-        time.sleep(4)
+        time.sleep(6)
         self.send_command('Stop')
         time.sleep(1)
         self.turn_right_mode()
@@ -129,10 +171,13 @@ class DirectionController(Node):
         time.sleep(8)
         
     def ROBOT_ARM_HOME(self):
-        self.send_command('go_home')
+        self.arm_service('go_home',timeout= 10)
     
     def ROBOT_ARM_HOME_MODE3(self):
-        self.send_command('mission_3_basic_state')
+        self.arm_service('mission_3_basic_state',timeout= 10)
+        
+    def ROBOT_ARM_HOME_MODE4(self):
+        self.arm_service('mission_4_basic_state',timeout= 10)
         
     def Go_Straight(self):    
         if self.IMU_Flag == True and self.roll == 0:
@@ -184,7 +229,7 @@ class DirectionController(Node):
             self.Stair_count += 1
             
         if self.Stair_count > 5:
-           self.Stair_end_flag == True     
+           self.Stair_end_flag = True     
         
         return self.Stair_end_flag
         
@@ -239,7 +284,7 @@ class DirectionController(Node):
         while True:
                 # 경과 시간 체크
             elapsed = time.time() - start_time
-            if elapsed > 10:  # 10초 넘으면 강제 종료
+            if elapsed > 15:  # 10초 넘으면 강제 종료
                 print("Timeout! Exit loop.")
                 break
             
@@ -337,7 +382,24 @@ class DirectionController(Node):
     def box_mode(self):
         self.send_command('Stop')
         time.sleep(1)
-        self.arm_service('pick')
+
+        # pick 수행 (비동기 시작)
+        if not self.arm_service('pick', timeout=30):
+            self.get_logger().error("Pick 시작 실패, box_mode 중단")
+            return
+
+        # pick이 백그라운드에서 실행 중이므로 충분히 대기
+        self.get_logger().info("Pick 완료 대기 중...")
+        time.sleep(15)  # pick 시퀀스 완료 대기
+
+        if not self.arm_service('place', timeout=15):
+            self.get_logger().error("Place 실패")
+            return
+
+        if not self.arm_service('see_person', timeout=15):
+            self.get_logger().error("see_person 실패")
+            return
+
         self.send_command('Stop')
         time.sleep(1)
 
@@ -356,7 +418,7 @@ class DirectionController(Node):
     def Press_LED_mode(self):
         self.send_command('Stop')
         time.sleep(1)
-        self.arm_service('press_button')
+        self.arm_service('led_button_press', timeout=50)
         
     def fire_search_mode(self):
         self.send_command('LED_ON')
@@ -364,7 +426,8 @@ class DirectionController(Node):
         time.sleep(3)
         self.send_command('Stop')
         time.sleep(1)
-        self.send_command('see_around')
+        
+        self.arm_service('see_around', timeout=15)
         time.sleep(12)
         self.send_command('LED_OFF')
 
